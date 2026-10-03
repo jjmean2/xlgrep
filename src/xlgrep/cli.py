@@ -17,6 +17,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from . import __version__
 from .address import CellRange, parse_range
 from .files import UnsupportedFile, iter_files
+from .funcs import FuncCounter
 from .matcher import Matcher, build_matcher
 from .objects import OBJECT_KINDS, SheetObject, WorkbookObjects, read_objects
 from .output import (
@@ -29,6 +30,7 @@ from .output import (
     OutputOptions,
     PrettyFormatter,
     Style,
+    write_func_stats,
 )
 from .workbook import Cell, Sheet, read_sheets
 
@@ -58,7 +60,11 @@ def parse_objects(text: str) -> set[str]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="xlgrep",
-        usage="xlgrep [OPTIONS] PATTERN [PATH ...]\n       xlgrep [OPTIONS] (-e PATTERN | -f FUNCS)... [PATH ...]",
+        usage=(
+            "xlgrep [OPTIONS] PATTERN [PATH ...]\n"
+            "       xlgrep [OPTIONS] (-e PATTERN | -f FUNCS)... [PATH ...]\n"
+            "       xlgrep --list-funcs [--by file|sheet] [-e PATTERN | -f FUNCS]... [PATH ...]"
+        ),
         description="Search the cells of Excel workbooks (.xlsx/.xlsm/.xltx/.xltm) like grep.",
         epilog=(
             "examples:\n"
@@ -66,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  xlgrep -f VLOOKUP,XLOOKUP .        cells calling these functions\n"
             "  xlgrep -p -C1 --header 'Total' .   pretty grid with column headers\n"
             "  xlgrep --in value -F '#N/A' .      cells whose computed value is #N/A\n"
+            "  xlgrep --list-funcs .              which functions are used, and how often\n"
             "\n"
             "exit status is 0 if a cell matched, 1 if none did, 2 if an error occurred."
         ),
@@ -118,6 +125,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-filename", action="store_true", help="don't prefix lines with the file name")
     g.add_argument("--color", choices=["auto", "always", "never"], default="auto", help="colorize output (default: auto)")
     g.add_argument("--max-width", type=int, default=40, metavar="N", help="pretty mode: max cell width (default 40, 0 = unlimited)")
+
+    g = p.add_argument_group("function summary")
+    g.add_argument("--list-funcs", action="store_true",
+                   help="count the functions used in formulas instead of printing matches; "
+                        "-e/-f then filter function names and all positional args are paths")
+    g.add_argument("--by", choices=["file", "sheet"], help="--list-funcs: break counts down per file or sheet")
+    g.add_argument("--sort", choices=["calls", "name"], default="calls",
+                   help="--list-funcs: order by call count (default) or name")
 
     g = p.add_argument_group("context")
     g.add_argument("-A", "--after-context", type=int, metavar="N", help="show N cells below each match (same column)")
@@ -194,6 +209,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     funcs = [name.strip() for item in args.func for name in item.split(",") if name.strip()]
+    if args.list_funcs:
+        return list_funcs(parser, args, funcs)
+    if args.by or args.sort != "calls":
+        parser.error("--by and --sort only apply to --list-funcs")
     if args.regexp or funcs:
         patterns, paths = args.regexp, args.args
     elif args.args:
@@ -337,6 +356,89 @@ def main(argv: Sequence[str] | None = None) -> int:
     if had_error:
         return EXIT_ERROR
     return EXIT_MATCH if any_match else EXIT_NO_MATCH
+
+
+_NOT_WITH_LIST_FUNCS = {
+    "files_with_matches": "-l", "count": "-c", "quiet": "-q", "only_matching": "-o", "invert_match": "-v",
+    "max_count": "-m", "after_context": "-A", "before_context": "-B", "context": "-C", "row": "--row",
+    "header": "--header", "show_value": "--show-value",
+}
+
+
+def list_funcs(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> int:
+    for dest, flag in _NOT_WITH_LIST_FUNCS.items():
+        if getattr(args, dest) not in (None, False):
+            parser.error(f"{flag} can't be combined with --list-funcs")
+    if args.search_in == "value":
+        parser.error("--list-funcs counts formulas and can't be combined with --in value")
+    try:
+        pattern = build_matcher(args.regexp, fixed=args.fixed_strings, ignore_case=args.ignore_case,
+                                smart_case=args.smart_case, word=args.word_regexp).pattern
+        cell_range = parse_range(args.cell_range) if args.cell_range else None
+    except re.error as exc:
+        parser.error(f"invalid pattern: {exc}")
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    wanted = {f.upper() for f in funcs}
+
+    def name_filter(name: str) -> bool:
+        if pattern is None and not wanted:
+            return True
+        return bool(pattern is not None and pattern.search(name)) or name.upper() in wanted
+
+    def sheet_filter(name: str, hidden: bool) -> bool:
+        if args.no_hidden and hidden:
+            return False
+        return not args.sheet or any(fnmatch.fnmatch(name, g) for g in args.sheet)
+
+    counter = FuncCounter(name_filter)
+    object_kinds = args.objects & {"name", "cf", "dv"}
+    had_error = False
+    for item in iter_files(args.args or ["."], args.glob):
+        if isinstance(item, UnsupportedFile):
+            print(f"xlgrep: {item}", file=sys.stderr)
+            had_error = True
+            continue
+        file = str(item)
+
+        def group(sheet: str | None):
+            return None if args.by is None else file if args.by == "file" else (file, sheet)
+
+        try:
+            objs = read_objects(item, object_kinds | {"name"}, raw_formula=True)
+            names = {o.ref.upper() for o in objs.workbook_names}
+            names |= {o.ref.upper() for lst in objs.by_sheet.values() for o in lst if o.object == "name"}
+            for info in objs.sheets:
+                if not sheet_filter(info.name, info.hidden):
+                    continue
+                for obj in objs.by_sheet[info.name]:
+                    if obj.object in object_kinds and (not cell_range or obj.in_range(cell_range)):
+                        counter.add(group(info.name), file, obj.text, names)
+            if "name" in object_kinds and not args.sheet and not cell_range:
+                for obj in objs.workbook_names:
+                    counter.add(group(None), file, obj.text, names)
+            if "cell" in args.objects:
+                for sheet in read_sheets(item, with_values=False, raw_formula=True, sheet_filter=sheet_filter):
+                    for cell in sheet.sorted_cells():
+                        if cell.is_formula and (not cell_range or cell_range.contains(cell.row, cell.col)):
+                            counter.add(group(sheet.name), file, cell.formula, names)
+        except (zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ET.ParseError) as exc:
+            print(f"xlgrep: {item}: cannot read workbook ({exc})", file=sys.stderr)
+            had_error = True
+
+    style = Style(_use_color(args.color))
+    mode = "json" if args.json else "csv" if args.csv else "table"
+    try:
+        found = write_func_stats(counter.rows(args.sort), args.by, mode, style)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return EXIT_MATCH
+    if had_error:
+        return EXIT_ERROR
+    return EXIT_MATCH if found else EXIT_NO_MATCH
 
 
 def run() -> None:

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .address import cell_name, col_letter, qualified
+from .funcs import BUILTIN, FuncStat
 from .matcher import Span
 from .objects import SheetObject
 from .text import char_width, display_width, escape, escape_spans
@@ -422,3 +423,58 @@ class CsvFormatter(Formatter):
     def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         for m in matches:
             self.writer.writerow([str(path), sheet or "", m.obj.object, m.obj.ref, m.kind, m.text, ""])
+
+
+def write_func_stats(groups, by: str | None, mode: str, style: Style, out: TextIO | None = None) -> bool:
+    """Render --list-funcs results. ``groups`` yields (group key, stats). Returns True if any row."""
+    out = out if out is not None else sys.stdout
+    found = False
+    writer = csv.writer(out, lineterminator="\n") if mode == "csv" else None
+    if writer is not None:
+        keys = {"file": ["file"], "sheet": ["file", "sheet"]}.get(by, [])
+        writer.writerow(keys + ["function", "category", "calls", "places"] + ([] if by else ["files"]))
+
+    current_file = None
+    for group, stats in groups:
+        found = True
+        file, sheet = (group if by == "sheet" else (group, None)) if by else (None, None)
+        if mode == "json":
+            for s in stats:
+                record = {"file": file, "sheet": sheet} if by == "sheet" else {"file": file} if by else {}
+                record.update(function=s.name, category=s.category, calls=s.calls, places=s.places)
+                if not by:
+                    record["files"] = len(s.files)
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
+        elif writer is not None:
+            prefix = [file, sheet or ""] if by == "sheet" else [file] if by else []
+            for s in stats:
+                writer.writerow(prefix + [s.name, s.category, s.calls, s.places] + ([] if by else [len(s.files)]))
+        else:
+            indent = ""
+            if by:
+                if file != current_file:
+                    if current_file is not None:
+                        out.write("\n")
+                    out.write(style.heading(file) + "\n")
+                    current_file = file
+                indent = "  "
+                if by == "sheet":
+                    out.write("  " + style.sheet(sheet if sheet is not None else "(workbook)") + "\n")
+                    indent = "    "
+            _write_func_table(stats, include_files=not by, indent=indent, style=style, out=out)
+    return found
+
+
+def _write_func_table(stats: list[FuncStat], include_files: bool, indent: str, style: Style, out: TextIO) -> None:
+    headers = ["FUNCTION", "CALLS", "PLACES"] + (["FILES"] if include_files else [])
+    rows = [[s.name, str(s.calls), str(s.places)] + ([str(len(s.files))] if include_files else []) for s in stats]
+    widths = [max(display_width(r[i]) for r in rows + [headers]) for i in range(len(headers))]
+
+    def fmt(cells: list[str]) -> str:
+        first = cells[0] + " " * (widths[0] - display_width(cells[0]))
+        return "  ".join([first] + [c.rjust(w) for c, w in zip(cells[1:], widths[1:])])
+
+    out.write(indent + style.dim(fmt(headers)) + "\n")
+    for s, row in zip(stats, rows):
+        tag = "" if s.category == BUILTIN else "  " + style.header(s.category)
+        out.write(indent + fmt(row) + tag + "\n")

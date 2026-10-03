@@ -85,6 +85,36 @@ openpyxl read_only는 조건부 서식·유효성 검사·메모를 읽지 않�
   호환용 메모도 함께 저장하므로 그쪽으로 잡힌다.
 - 범위 밖: 차트 수식, 피벗, 외부 연결, VBA.
 
+## 함수 사용 집계 (`--list-funcs`)
+
+검색 결과 대신, 수식에서 쓰인 함수를 집계한다.
+
+```
+$ xlgrep --list-funcs reports/
+FUNCTION    CALLS  PLACES  FILES
+VLOOKUP       142     130     12
+SUMIFS         88      80      9
+XLOOKUP         7       7      2
+MyLambda        3       3      1  lambda
+GetRate         2       2      1  custom
+```
+
+- CALLS: 호출 횟수(중첩 포함). PLACES: 그 함수가 든 수식 위치 수. FILES: 파일 수.
+- 마지막 열: 내장 함수는 비움, `lambda`(같은 통합문서의 이름 정의와 일치), `custom`(VBA/추가 기능).
+  - 판별 규칙: `openpyxl.utils.formulas.FORMULAE`(Excel 2007 내장 355개)에 있거나, 파일에 `_xlfn.`/`_xlws.` 접두사로
+    저장된 함수(2007 이후 추가 함수는 항상 이 접두사로 저장됨)는 내장. `_xll.` 접두사는 XLL 추가 기능 → custom.
+    별도 함수 목록을 유지할 필요가 없다.
+- 함수 추출은 `openpyxl.formula.Tokenizer`의 FUNC/OPEN 토큰(문자열 리터럴 안은 자동 제외). 토크나이저가 실패하는
+  깨진 수식은 문자열 리터럴을 가린 뒤 정규식으로 대체 추출.
+- 이 모드에서 위치 인자는 모두 경로이고, `-e PATTERN`(정규식, `-i`/`-F`/`-w`/`-S` 적용)과 `-f NAMES`(정확히 일치)는
+  **함수 이름**을 거른다(사용자 결정). 둘 다 주면 합집합.
+- `--by file|sheet`: 파일별/시트별로 나눠 표시. 시트별에서 통합문서 범위 이름은 `(workbook)`.
+- `--sort calls|name`: 기본은 CALLS 내림차순.
+- 범위 옵션(`--objects`, `--sheet`, `--range`, `-g`, `--no-hidden`)은 그대로 적용. 메모는 수식이 아니므로 집계 대상 아님.
+- `--json`(집계 행마다 한 줄), `--csv` 지원. `-p`는 기본 표와 같으므로 무시.
+- 셀 단위 출력 옵션(`-l -c -q -o -v -m -A -B -C --row --header --show-value`, `--in value`)은 함께 쓰면 오류.
+  반대로 `--by`/`--sort`를 `--list-funcs` 없이 쓰면 오류.
+
 ## 옵션
 
 ### 패턴
@@ -155,6 +185,7 @@ src/xlgrep/
   files.py     경로 탐색, 글롭 필터
   workbook.py  워크북 읽기 → 시트별 셀 격자 (수식/값)
   objects.py   셀 밖 대상 (이름 정의, 조건부 서식, 유효성 검사, 메모) — XML 직접 파싱
+  funcs.py     --list-funcs: 함수 추출, 내장/lambda/custom 분류, 집계
   text.py      수식 정규화, 값 문자열화, 이스케이프, 표시 폭
   matcher.py   패턴 컴파일, 매칭 구간 계산
   address.py   셀 주소/범위 변환, 시트명 인용
@@ -173,6 +204,8 @@ src/xlgrep/
 | 시트 전체를 메모리에 적재 | 2차원 컨텍스트 계산이 단순. 대용량 파일에서 문제되면 재검토 |
 | 셀 밖 대상 기본 포함 (사용자 결정) | 함수 사용처를 빠짐없이 찾는 주 용도. 추가 비용이 거의 없음 |
 | 셀 밖 대상은 위치 뒤 `#종류` 표기 (사용자 결정) | `경로:위치:내용` 3필드 유지. `[...]`는 `--header`가 사용 중 |
+| 집계는 하위 명령 대신 `--list-funcs` 플래그 (사용자 결정) | 단일 명령 유지. rg의 `--files`, `--type-list`와 같은 방식 |
+| 집계 모드의 `-e`/`-f`는 함수 이름을 거름 (사용자 결정) | "LOOKUP 계열 함수가 얼마나 쓰이나" 같은 질문에 바로 답함 |
 
 ## 로드맵
 
@@ -182,8 +215,7 @@ src/xlgrep/
 ### 2단계 (우선순위 순)
 
 1. ~~**셀 밖의 수식 검색**~~ — 완료. 위 "셀 밖의 대상" 절.
-2. **`--list-funcs` / `--count-by func|file|sheet`** — 사용된 함수 집계.
-   - 함수 추출은 정규식보다 `openpyxl.formula.Tokenizer`(FUNC/OPEN 토큰)가 정확하다.
+2. ~~**`--list-funcs`**~~ — 완료. 위 "함수 사용 집계" 절. (`--count-by`는 `--by file|sheet`로 구현)
 3. **`--ref 'Data!A:D'`** — 특정 범위를 참조하는 수식 검색.
    - Tokenizer의 OPERAND/RANGE 토큰으로 참조 추출 후 범위 겹침 판정.
    - 어려운 경우: 시트명 생략 참조(같은 시트), 이름 정의 경유, INDIRECT/OFFSET, 구조적 참조(`Table[Col]`), 외부 통합문서 `[1]Sheet!A1`.
@@ -198,10 +230,10 @@ src/xlgrep/
 
 ## 검증되지 않은 부분
 
-- **실제 Excel이 저장한 파일**로 계산값(`--in value`, `--show-value`)을 확인하지 않았다. 테스트는 XML 패치로 만든 캐시값만 사용.
 - 대용량 파일 성능 (두 번 읽기 + 시트 전체 메모리 적재).
-- **실제 Excel이 저장한 파일**의 조건부 서식/유효성 검사/x14 확장/메모. 테스트는 openpyxl로 만든 파일에 x14 블록을
-  XML로 덧붙여 확인함.
+- `--list-funcs`는 실제 Excel 파일로 아직 확인하지 않았다.
+
+사용자가 실제 업무 파일로 v0.2.0(셀, 계산값, 이름/조건부 서식/유효성 검사/메모)을 써 보고 잘 동작한다고 확인함 (2026-10-03).
 
 확인된 것: **공유 수식**(채우기 핸들로 복사한 수식. 마스터 셀에만 텍스트가 있고 나머지는 `<f t="shared" si="0"/>`)은
 openpyxl read_only가 셀별 수식(`=A2*2`, `=A3*2`)으로 풀어준다. XML을 직접 작성해 확인함 (2026-10-03).

@@ -44,6 +44,8 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | Rest of the matching row | `xlgrep --row 'TODO' .` |
 | Pretty grid grouped by file and sheet | `xlgrep -p -C1 --header -f SUMIFS .` |
 | Machine-readable | `xlgrep --json ...`, `xlgrep --csv ...` |
+| Which functions are used, and how often | `xlgrep --list-funcs .` |
+| Function usage per file / sheet | `xlgrep --list-funcs --by file -f VLOOKUP,XLOOKUP .` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
 | Limit scope | `-g '*.xlsm'`, `-g '!*backup*'`, `--sheet 'Data*'`, `--range B2:F100`, `--no-hidden` |
 | Only some places | `--objects cells`, `--objects names,cf,dv` |
@@ -58,6 +60,11 @@ saved (files written by tools that don't calculate have no stored results).
 Besides cells, xlgrep searches formulas outside cells — defined names, conditional formatting
 rules and data validations — and the text of cell notes. These print as `Summary!B2:B50#cf:=...`,
 `TaxRate#name:=...`, `Summary!C3#note:...`. Restrict with `--objects`.
+
+`--list-funcs` prints a table of functions with their call count, the number of formulas
+using them and the number of files. Custom functions are marked `lambda` (a LAMBDA defined
+name in the same workbook) or `custom` (VBA / add-in). In this mode `-e`/`-f` filter
+function names, and all positional arguments are paths.
 
 Newer functions are stored as `_xlfn.XLOOKUP`, `_xlfn._xlws.FILTER` etc.; xlgrep strips
 these prefixes so formulas read as they do in Excel. Use `--raw-formula` to keep them.
