@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,9 +75,7 @@ def read_sheets(
     value Excel cached the last time the file was saved (requires a second pass
     over the file, since openpyxl reads either formulas or values, not both).
     """
-    with warnings.catch_warnings():
-        # openpyxl warns about unsupported extensions (data validation, etc.); irrelevant here.
-        warnings.simplefilter("ignore")
+    with _quiet():
         wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
         values_wb = openpyxl.load_workbook(path, read_only=True, data_only=True) if with_values else None
     try:
@@ -85,23 +84,33 @@ def read_sheets(
             if sheet_filter and not sheet_filter(ws.title, hidden):
                 continue
             sheet = Sheet(ws.title, hidden)
-            for row in ws.iter_rows():
-                for c in row:
-                    if c.value is None or not hasattr(c, "row"):
-                        continue
-                    formula = _formula_text(c.value, raw_formula)
-                    if formula is not None:
-                        cell = Cell(c.row, c.column, formula=formula)
-                    else:
-                        cell = Cell(c.row, c.column, value=c.value, has_cached_value=True)
-                    sheet.cells[(c.row, c.column)] = cell
-            if values_wb is not None:
-                _fill_cached_values(sheet, values_wb[ws.title])
+            # read_only sheets are parsed lazily, so warnings fire here, not at load time.
+            with _quiet():
+                for row in ws.iter_rows():
+                    for c in row:
+                        if c.value is None or not hasattr(c, "row"):
+                            continue
+                        formula = _formula_text(c.value, raw_formula)
+                        if formula is not None:
+                            cell = Cell(c.row, c.column, formula=formula)
+                        else:
+                            cell = Cell(c.row, c.column, value=c.value, has_cached_value=True)
+                        sheet.cells[(c.row, c.column)] = cell
+                if values_wb is not None:
+                    _fill_cached_values(sheet, values_wb[ws.title])
             yield sheet
     finally:
         wb.close()
         if values_wb is not None:
             values_wb.close()
+
+
+@contextmanager
+def _quiet() -> Iterator[None]:
+    """Silence openpyxl's warnings about parts it doesn't support (extensions, etc.)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        yield
 
 
 def _fill_cached_values(sheet: Sheet, ws) -> None:
