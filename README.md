@@ -46,6 +46,7 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | Machine-readable | `xlgrep --json ...`, `xlgrep --csv ...` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
 | Limit scope | `-g '*.xlsm'`, `-g '!*backup*'`, `--sheet 'Data*'`, `--range B2:F100`, `--no-hidden` |
+| Only some places | `--objects cells`, `--objects names,cf,dv` |
 
 ### What gets searched
 
@@ -53,6 +54,10 @@ By default (`--in auto`) formula cells are matched on their formula text and oth
 on their value. `--in formula` restricts the search to formula cells; `--in value` matches
 what the sheet displays, using the result Excel stored for formulas when the file was last
 saved (files written by tools that don't calculate have no stored results).
+
+Besides cells, xlgrep searches formulas outside cells — defined names, conditional formatting
+rules and data validations — and the text of cell notes. These print as `Summary!B2:B50#cf:=...`,
+`TaxRate#name:=...`, `Summary!C3#note:...`. Restrict with `--objects`.
 
 Newer functions are stored as `_xlfn.XLOOKUP`, `_xlfn._xlws.FILTER` etc.; xlgrep strips
 these prefixes so formulas read as they do in Excel. Use `--raw-formula` to keep them.

@@ -9,6 +9,7 @@ import re
 import sys
 import zipfile
 from collections.abc import Sequence
+from xml.etree import ElementTree as ET
 from pathlib import Path
 
 from openpyxl.utils.exceptions import InvalidFileException
@@ -17,12 +18,14 @@ from . import __version__
 from .address import CellRange, parse_range
 from .files import UnsupportedFile, iter_files
 from .matcher import Matcher, build_matcher
+from .objects import OBJECT_KINDS, SheetObject, WorkbookObjects, read_objects
 from .output import (
     CsvFormatter,
     Formatter,
     JsonFormatter,
     LineFormatter,
     Match,
+    ObjectMatch,
     OutputOptions,
     PrettyFormatter,
     Style,
@@ -30,6 +33,26 @@ from .output import (
 from .workbook import Cell, Sheet, read_sheets
 
 EXIT_MATCH, EXIT_NO_MATCH, EXIT_ERROR = 0, 1, 2
+
+# --objects names -> internal kinds
+OBJECT_CHOICES = {"cells": "cell", "names": "name", "cf": "cf", "dv": "dv", "notes": "note"}
+
+
+def parse_objects(text: str) -> set[str]:
+    kinds = set()
+    for item in text.split(","):
+        item = item.strip().lower()
+        if item == "all":
+            kinds.update(OBJECT_CHOICES.values())
+        elif item in OBJECT_CHOICES:
+            kinds.add(OBJECT_CHOICES[item])
+        elif item:
+            raise argparse.ArgumentTypeError(
+                f"unknown object {item!r} (choose from all, {', '.join(OBJECT_CHOICES)})"
+            )
+    if not kinds:
+        raise argparse.ArgumentTypeError("no objects given")
+    return kinds
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--in", dest="search_in", choices=["auto", "formula", "value"], default="auto",
                    help="auto: formula text for formula cells, value otherwise (default); "
                         "formula: formula cells only; value: displayed values, incl. cached formula results")
+    g.add_argument("--objects", type=parse_objects, default=set(OBJECT_CHOICES.values()), metavar="LIST",
+                   help="where to search, comma-separated: cells, names (defined names), cf (conditional "
+                        "formats), dv (data validations), notes (cell notes), or all (default)")
     g.add_argument("--raw-formula", action="store_true",
                    help="keep _xlfn./_xlws./_xlpm. prefixes as stored in the file")
 
@@ -127,6 +153,25 @@ class Searcher:
             return (cell.value_str, "value") if cell.has_cached_value else None
         return (cell.formula, "formula") if cell.is_formula else (cell.value_str, "value")
 
+    def _spans(self, text: str, kind: str) -> list | None:
+        """Spans to report, or None if the text isn't selected (honours -v)."""
+        spans = self.matcher.spans(text, is_formula=kind == "formula")
+        return spans if bool(spans) != self.invert else None
+
+    def search_objects(self, objects: list[SheetObject], limit: int | None) -> list[ObjectMatch]:
+        matches: list[ObjectMatch] = []
+        for obj in objects:
+            if limit is not None and len(matches) >= limit:
+                break
+            if self.search_in == ("value" if obj.is_formula else "formula"):
+                continue
+            if self.cell_range and not obj.in_range(self.cell_range):
+                continue
+            spans = self._spans(obj.text, "formula" if obj.is_formula else "value")
+            if spans is not None:
+                matches.append(ObjectMatch(obj, spans))
+        return matches
+
     def search(self, sheet: Sheet, limit: int | None) -> list[Match]:
         matches: list[Match] = []
         for cell in sheet.sorted_cells():
@@ -138,8 +183,8 @@ class Searcher:
             if searched is None or searched[0] == "":
                 continue
             text, kind = searched
-            spans = self.matcher.spans(text, is_formula=kind == "formula")
-            if bool(spans) != self.invert:
+            spans = self._spans(text, kind)
+            if spans is not None:
                 matches.append(Match(cell, text, kind, spans))
         return matches
 
@@ -216,6 +261,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return not args.sheet or any(fnmatch.fnmatch(name, g) for g in args.sheet)
 
     searcher = Searcher(matcher, args, cell_range)
+    object_kinds = args.objects & set(OBJECT_KINDS)
     any_match = had_error = False
     try:
         for item in iter_files(paths or ["."], args.glob):
@@ -225,20 +271,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             try:
                 count = 0
-                for sheet in read_sheets(item, with_values=with_values and not summary_only,
-                                         raw_formula=args.raw_formula, sheet_filter=sheet_filter):
-                    remaining = None if limit is None else limit - count
-                    if remaining is not None and remaining <= 0:
-                        break
-                    matches = searcher.search(sheet, remaining)
-                    if not matches:
-                        continue
+
+                def remaining() -> int | None:
+                    return None if limit is None else limit - count
+
+                def emit_objects(sheet_name: str | None, hidden: bool, objects: list[SheetObject]) -> None:
+                    nonlocal count
+                    if not objects or (remaining() is not None and remaining() <= 0):
+                        return
+                    matches = searcher.search_objects(objects, remaining())
                     count += len(matches)
-                    if args.quiet:
-                        return EXIT_MATCH
-                    if not summary_only:
-                        formatter.write_sheet(item, sheet, matches)
-            except (zipfile.BadZipFile, InvalidFileException, KeyError, OSError) as exc:
+                    if matches and not summary_only:
+                        formatter.write_objects(item, sheet_name, hidden, matches)
+
+                wb_objects: WorkbookObjects | None = None
+                if object_kinds:
+                    wb_objects = read_objects(item, object_kinds, raw_formula=args.raw_formula)
+
+                done: set[str] = set()
+                if "cell" in args.objects:
+                    for sheet in read_sheets(item, with_values=with_values and not summary_only,
+                                             raw_formula=args.raw_formula, sheet_filter=sheet_filter):
+                        done.add(sheet.name)
+                        if remaining() is not None and remaining() <= 0:
+                            break
+                        matches = searcher.search(sheet, remaining())
+                        count += len(matches)
+                        if matches and not summary_only:
+                            formatter.write_sheet(item, sheet, matches)
+                        if wb_objects is not None:
+                            emit_objects(sheet.name, sheet.hidden, wb_objects.by_sheet.get(sheet.name, []))
+                        if count and args.quiet:
+                            return EXIT_MATCH
+                if wb_objects is not None:
+                    for info in wb_objects.sheets:
+                        if info.name not in done and sheet_filter(info.name, info.hidden):
+                            emit_objects(info.name, info.hidden, wb_objects.by_sheet[info.name])
+                    # Workbook-scoped names belong to no sheet or range.
+                    if not args.sheet and not cell_range:
+                        emit_objects(None, False, wb_objects.workbook_names)
+                if count and args.quiet:
+                    return EXIT_MATCH
+            except (zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ET.ParseError) as exc:
                 print(f"xlgrep: {item}: cannot read workbook ({exc})", file=sys.stderr)
                 had_error = True
                 continue

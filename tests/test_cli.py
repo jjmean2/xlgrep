@@ -109,7 +109,7 @@ def test_json(run):
     _, out, _ = run("--json", "SUM")
     rec = json.loads(out)
     assert rec == {
-        "file": "sales.xlsx", "sheet": "Summary", "cell": "B4", "row": 4, "col": 2,
+        "file": "sales.xlsx", "object": "cell", "sheet": "Summary", "cell": "B4", "row": 4, "col": 2,
         "kind": "formula", "formula": "=SUM(B2:B3)", "value": 2180, "text": "=SUM(B2:B3)",
         "matches": [{"start": 1, "end": 4, "text": "SUM"}],
     }
@@ -117,7 +117,10 @@ def test_json(run):
 
 def test_csv(run):
     _, out, _ = run("--csv", "합계")
-    assert out.splitlines() == ["file,sheet,cell,kind,content,value", "sales.xlsx,Summary,A4,value,합계,합계"]
+    assert out.splitlines() == [
+        "file,sheet,object,location,kind,content,value",
+        "sales.xlsx,Summary,cell,A4,value,합계,합계",
+    ]
 
 
 def test_pretty(run):

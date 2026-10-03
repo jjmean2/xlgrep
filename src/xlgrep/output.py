@@ -13,6 +13,7 @@ from typing import TextIO
 
 from .address import cell_name, col_letter, qualified
 from .matcher import Span
+from .objects import SheetObject
 from .text import char_width, display_width, escape, escape_spans
 from .workbook import Cell, Sheet
 
@@ -23,6 +24,20 @@ class Match:
     text: str  # the text that was searched
     kind: str  # "formula" or "value"
     spans: list[Span]
+
+
+@dataclass
+class ObjectMatch:
+    obj: SheetObject
+    spans: list[Span]
+
+    @property
+    def text(self) -> str:
+        return self.obj.text
+
+    @property
+    def kind(self) -> str:
+        return "formula" if self.obj.is_formula else "value"
 
 
 ContentFn = Callable[[Cell], str]
@@ -96,6 +111,10 @@ class Formatter:
     def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
         raise NotImplementedError
 
+    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+        """Matches outside cells; ``sheet`` is None for workbook-scoped names."""
+        raise NotImplementedError
+
     def end_file(self, path: Path, count: int) -> None:
         pass
 
@@ -151,6 +170,18 @@ class LineFormatter(Formatter):
                     content = self.opts.content(cell)
                     self._line(path, sheet, cell, "-", escape(content) + self._value_suffix(cell, content))
 
+    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+        st = self.opts.style
+        for m in matches:
+            location = st.addr(m.obj.location) + st.header(f"#{m.obj.object}")
+            prefix = f"{st.path(str(path))}{st.sep(':')}" if self.opts.with_filename else ""
+            if self.opts.only_matching:
+                bodies = [st.match(escape(m.text[s:e])) for s, e in m.spans]
+            else:
+                bodies = [st.highlight(escape(m.text), escape_spans(m.text, m.spans))]
+            for body in bodies:
+                self.out.write(f"{prefix}{location}{st.sep(':')}{body}\n")
+
     def _match_line(self, path: Path, sheet: Sheet, m: Match) -> None:
         body = self.opts.style.highlight(escape(m.text), escape_spans(m.text, m.spans))
         self._line(path, sheet, m.cell, ":", body + self._value_suffix(m.cell, m.text))
@@ -194,22 +225,44 @@ class PrettyFormatter(Formatter):
     def __init__(self, opts: OutputOptions, out: TextIO | None = None):
         super().__init__(opts, out)
         self._current_file: Path | None = None
+        self._current_sheet: tuple[str | None] | None = None
         self._first_file = True
 
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+    def _enter(self, path: Path, sheet: str | None, hidden: bool) -> bool:
+        """Print file/sheet headings as needed. Returns True if the sheet was already open."""
         st = self.opts.style
         if path != self._current_file:
             if not self._first_file:
                 self.out.write("\n")
             self._first_file = False
             self._current_file = path
+            self._current_sheet = None
             self.out.write(st.heading(str(path)) + "\n")
-        title = sheet.name + (" (hidden)" if sheet.hidden else "")
+        if self._current_sheet == (sheet,):
+            return True
+        self._current_sheet = (sheet,)
+        title = "(workbook)" if sheet is None else sheet + (" (hidden)" if hidden else "")
         self.out.write("  " + st.sheet(title) + "\n")
+        return False
+
+    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+        self._enter(path, sheet.name, sheet.hidden)
         for i, block in enumerate(self._blocks(sheet, matches)):
             if i:
                 self.out.write("\n")
             self._render_block(sheet, *block)
+
+    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+        st = self.opts.style
+        if self._enter(path, sheet, hidden):
+            self.out.write("\n")
+        tags = [f"#{m.obj.object}" for m in matches]
+        tag_w = max(len(t) for t in tags)
+        ref_w = max(display_width(m.obj.ref) for m in matches)
+        for tag, m in zip(tags, matches):
+            text, spans = escape(m.text), escape_spans(m.text, m.spans)
+            ref = st.addr(m.obj.ref) + " " * (ref_w - display_width(m.obj.ref))
+            self.out.write(f"    {st.header(tag.ljust(tag_w))}  {ref}  {st.highlight(text, spans)}\n")
 
     def end_file(self, path: Path, count: int) -> None:
         if count:
@@ -321,6 +374,7 @@ class JsonFormatter(Formatter):
             cell = m.cell
             record = {
                 "file": str(path),
+                "object": "cell",
                 "sheet": sheet.name,
                 "cell": cell_name(cell.row, cell.col),
                 "row": cell.row,
@@ -335,15 +389,36 @@ class JsonFormatter(Formatter):
                 record["hidden_sheet"] = True
             self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+        for m in matches:
+            record = {
+                "file": str(path),
+                "object": m.obj.object,
+                "sheet": sheet,
+                "ref": m.obj.ref,
+                "kind": m.kind,
+                "text": m.text,
+                "matches": [{"start": s, "end": e, "text": m.text[s:e]} for s, e in m.spans],
+                **m.obj.detail,
+            }
+            if hidden:
+                record["hidden_sheet"] = True
+            self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
+
 
 class CsvFormatter(Formatter):
     def __init__(self, opts: OutputOptions, out: TextIO | None = None):
         super().__init__(opts, out)
         self.writer = csv.writer(self.out, lineterminator="\n")
-        self.writer.writerow(["file", "sheet", "cell", "kind", "content", "value"])
+        self.writer.writerow(["file", "sheet", "object", "location", "kind", "content", "value"])
 
     def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
         for m in matches:
             cell = m.cell
             value = cell.value_str if cell.has_cached_value else ""
-            self.writer.writerow([str(path), sheet.name, cell_name(cell.row, cell.col), m.kind, m.text, value])
+            row = [str(path), sheet.name, "cell", cell_name(cell.row, cell.col), m.kind, m.text, value]
+            self.writer.writerow(row)
+
+    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+        for m in matches:
+            self.writer.writerow([str(path), sheet or "", m.obj.object, m.obj.ref, m.kind, m.text, ""])
