@@ -1,0 +1,62 @@
+# xlgrep
+
+grep for the cells of Excel workbooks. Search formulas and values across many
+`.xlsx` / `.xlsm` / `.xltx` / `.xltm` files and get `file:Sheet!Cell:content` lines back.
+
+```
+$ xlgrep -f VLOOKUP reports/
+reports/sales.xlsx:Summary!B2:=VLOOKUP(A2,Data!A:D,4,FALSE)
+reports/sales.xlsx:'Raw Data'!F3:=IFERROR(VLOOKUP(E3,Map,2,0),"")
+```
+
+## Install
+
+```
+uv tool install .        # or: pipx install .
+```
+
+For development:
+
+```
+uv sync
+uv run xlgrep --help
+uv run pytest
+```
+
+## Usage
+
+```
+xlgrep [OPTIONS] PATTERN [PATH ...]
+xlgrep [OPTIONS] (-e PATTERN | -f FUNCS)... [PATH ...]
+```
+
+Directories are searched recursively; with no path, the current directory is searched.
+Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
+
+| Task | Command |
+|---|---|
+| Cells calling a function (ignores string literals, case-insensitive) | `xlgrep -f VLOOKUP,XLOOKUP .` |
+| Regex over formulas and values | `xlgrep 'Data!\$?A' .` |
+| Literal string, case-insensitive | `xlgrep -Fi 'total (krw)' .` |
+| Computed values (cached results) only | `xlgrep --in value -F '#N/A' .` |
+| Show cached results next to formulas | `xlgrep --show-value -f SUMIFS .` |
+| Context: 2 cells above/below, column header | `xlgrep -C2 --header -f SUMIFS .` |
+| Rest of the matching row | `xlgrep --row 'TODO' .` |
+| Pretty grid grouped by file and sheet | `xlgrep -p -C1 --header -f SUMIFS .` |
+| Machine-readable | `xlgrep --json ...`, `xlgrep --csv ...` |
+| Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
+| Limit scope | `-g '*.xlsm'`, `-g '!*backup*'`, `--sheet 'Data*'`, `--range B2:F100`, `--no-hidden` |
+
+### What gets searched
+
+By default (`--in auto`) formula cells are matched on their formula text and other cells
+on their value. `--in formula` restricts the search to formula cells; `--in value` matches
+what the sheet displays, using the result Excel stored for formulas when the file was last
+saved (files written by tools that don't calculate have no stored results).
+
+Newer functions are stored as `_xlfn.XLOOKUP`, `_xlfn._xlws.FILTER` etc.; xlgrep strips
+these prefixes so formulas read as they do in Excel. Use `--raw-formula` to keep them.
+
+Legacy `.xls` files are not supported.
+
+See [DESIGN.md](DESIGN.md) for the design and roadmap.

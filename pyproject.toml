@@ -1,0 +1,31 @@
+[project]
+name = "xlgrep"
+version = "0.1.0"
+description = "grep for the cells of Excel workbooks: search formulas and values across many .xlsx files"
+readme = "README.md"
+authors = [
+    { name = "Jongwan Lee", email = "jjmean2@gmail.com" }
+]
+requires-python = ">=3.10"
+keywords = ["excel", "xlsx", "grep", "search", "cli", "openpyxl"]
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "openpyxl>=3.1.5",
+]
+
+[project.scripts]
+xlgrep = "xlgrep.cli:run"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
