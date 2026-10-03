@@ -131,6 +131,17 @@ def test_pretty(run):
     ]
 
 
+def test_pretty_multiple_matches_in_one_row(run):
+    _, out, _ = run("-p", "--sheet", "Summary", "--range", "2:2", ".")
+    assert out.splitlines() == [
+        "sales.xlsx",
+        "  Summary",
+        "      │ A    │ B                             │ C  │ D",
+        "  ▶ 2 │ 서울 │ =VLOOKUP(A2,Data!A:D,4,FALSE) │ ok │",
+        "  3 matches",
+    ]
+
+
 def test_errors(run, sample_dir):
     (sample_dir / "broken.xlsx").write_text("not a zip")
     (sample_dir / "old.xls").write_bytes(b"BIFF")

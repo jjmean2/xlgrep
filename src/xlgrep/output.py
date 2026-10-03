@@ -218,7 +218,8 @@ class PrettyFormatter(Formatter):
     def _blocks(self, sheet: Sheet, matches: list[Match]):
         """Yield (rows, cols, matches_by_pos) for groups of matches with overlapping row windows."""
         windows = sorted(
-            (max(1, m.cell.row - self.opts.before), m.cell.row + self.opts.after, m) for m in matches
+            ((max(1, m.cell.row - self.opts.before), m.cell.row + self.opts.after, m) for m in matches),
+            key=lambda w: (w[0], w[1]),  # Match itself isn't orderable; same-row matches tie here
         )
         groups: list[list] = []
         for lo, hi, m in windows:
