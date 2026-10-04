@@ -3,37 +3,21 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import csv
 import os
 import re
 import sys
-import zipfile
 from collections.abc import Sequence
-from xml.etree import ElementTree as ET
 from pathlib import Path
-
-from openpyxl.utils.exceptions import InvalidFileException
 
 from . import __version__
 from .address import CellRange, parse_range
 from .files import UnsupportedFile, iter_files
 from .funcs import FuncCounter
-from .matcher import Matcher, build_matcher, merge_spans
-from .objects import OBJECT_KINDS, SheetObject, WorkbookObjects, read_objects
-from .refs import RefFinder, RefHit, Target, parse_target
-from .output import (
-    CsvFormatter,
-    Formatter,
-    JsonFormatter,
-    LineFormatter,
-    Match,
-    ObjectMatch,
-    OutputOptions,
-    PrettyFormatter,
-    Style,
-    write_func_stats,
-)
-from .workbook import Cell, Sheet, read_sheets
+from .matcher import build_matcher
+from .output import CSV_HEADER, OutputOptions, Style, write_func_stats
+from .refs import parse_target
+from .search import FuncConfig, Runner, Scope, SearchConfig, choose_jobs, count_file, search_file
 
 EXIT_MATCH, EXIT_NO_MATCH, EXIT_ERROR = 0, 1, 2
 
@@ -149,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show the column header taken from ROW (default 1)")
     g.add_argument("--col-context", type=int, default=1, metavar="N", help="pretty mode: columns shown on each side (default 1)")
 
+    p.add_argument("-j", "--threads", type=int, metavar="N",
+                   help="files to search in parallel (default: CPU count when there are several "
+                        "files totalling over 1 MB, otherwise 1)")
     p.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
@@ -159,84 +146,19 @@ def _use_color(choice: str) -> bool:
     return sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
 
 
-class Searcher:
-    def __init__(self, matcher: Matcher, args: argparse.Namespace, cell_range: CellRange | None,
-                 object_kinds: set[str], targets: list[Target]):
-        self.matcher = matcher
-        self.search_in = args.search_in
-        self.invert = args.invert_match
-        self.cell_range = cell_range
-        self.object_kinds = object_kinds
-        self.targets = targets
-        self.ref_finder: RefFinder | None = None  # set per workbook when --ref is used
+def _list_items(paths: list[str], globs: list[str]) -> list[Path | UnsupportedFile]:
+    return list(iter_files(paths or ["."], globs))
 
-    def start_workbook(self, objects: WorkbookObjects | None) -> None:
-        if not self.targets or objects is None:
-            return
-        names = {(o.sheet, o.ref.upper()): o.text for o in objects.workbook_names}
-        names.update({(o.sheet, o.ref.upper()): o.text
-                      for lst in objects.by_sheet.values() for o in lst if o.object == "name"})
-        self.ref_finder = RefFinder(self.targets, [s.name for s in objects.sheets], names)
 
-    def searched_text(self, cell: Cell) -> tuple[str, str] | None:
-        """The (text, kind) to match against, or None if the cell is out of scope."""
-        if self.search_in == "formula":
-            return (cell.formula, "formula") if cell.is_formula else None
-        if self.search_in == "value":
-            return (cell.value_str, "value") if cell.has_cached_value else None
-        return (cell.formula, "formula") if cell.is_formula else (cell.value_str, "value")
+def _scope(args: argparse.Namespace, cell_range: CellRange | None) -> Scope:
+    return Scope(objects=set(args.objects), sheet_globs=list(args.sheet), no_hidden=args.no_hidden,
+                 cell_range=cell_range, raw_formula=args.raw_formula)
 
-    def _select(self, text: str, kind: str, sheet: str | None,
-                applies_to: list[CellRange] | None = None) -> tuple[list, list[RefHit] | None] | None:
-        """(spans to highlight, --ref hits) if the text is selected, else None. Honours -v."""
-        if self.targets and kind != "formula":
-            return None  # references only exist in formulas
-        spans = self.matcher.spans(text, is_formula=kind == "formula")
-        selected = bool(spans) or self.matcher.empty
-        hits = None
-        if selected and self.targets:
-            hits = self.ref_finder.find(text, sheet, applies_to) if self.ref_finder else []
-            selected = bool(hits)
-        if selected == self.invert:
-            return None
-        if self.invert:
-            return [], None
-        if hits:
-            spans = merge_spans(spans + [(h.start, h.end) for h in hits])
-        return spans, hits
 
-    def search_objects(self, objects: list[SheetObject], limit: int | None) -> list[ObjectMatch]:
-        matches: list[ObjectMatch] = []
-        for obj in objects:
-            if limit is not None and len(matches) >= limit:
-                break
-            if obj.object not in self.object_kinds:
-                continue
-            if self.search_in == ("value" if obj.is_formula else "formula"):
-                continue
-            if self.cell_range and not obj.in_range(self.cell_range):
-                continue
-            selected = self._select(obj.text, "formula" if obj.is_formula else "value", obj.sheet,
-                                    obj.areas if obj.object in ("cf", "dv") else None)
-            if selected is not None:
-                matches.append(ObjectMatch(obj, *selected))
-        return matches
-
-    def search(self, sheet: Sheet, limit: int | None) -> list[Match]:
-        matches: list[Match] = []
-        for cell in sheet.sorted_cells():
-            if limit is not None and len(matches) >= limit:
-                break
-            if self.cell_range and not self.cell_range.contains(cell.row, cell.col):
-                continue
-            searched = self.searched_text(cell)
-            if searched is None or searched[0] == "":
-                continue
-            text, kind = searched
-            selected = self._select(text, kind, sheet.name)
-            if selected is not None:
-                matches.append(Match(cell, text, kind, *selected))
-        return matches
+def _quiet_pipe() -> None:
+    """Output was piped into e.g. `head` and closed; discard the rest silently."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -244,6 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     funcs = [name.strip() for item in args.func for name in item.split(",") if name.strip()]
+    if args.threads is not None and args.threads < 1:
+        parser.error("-j/--threads must be at least 1")
     if args.list_funcs:
         return list_funcs(parser, args, funcs)
     if args.by or args.sort != "calls":
@@ -260,10 +184,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--ref searches formulas and can't be combined with --in value")
     try:
         targets = [parse_target(r) for r in args.ref]
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    try:
         matcher = build_matcher(
             patterns,
             funcs=funcs,
@@ -272,130 +192,85 @@ def main(argv: Sequence[str] | None = None) -> int:
             smart_case=args.smart_case,
             word=args.word_regexp,
         )
+        cell_range = parse_range(args.cell_range) if args.cell_range else None
     except re.error as exc:
         parser.error(f"invalid pattern: {exc}")
-    try:
-        cell_range = parse_range(args.cell_range) if args.cell_range else None
     except ValueError as exc:
         parser.error(str(exc))
 
     context = args.context or 0
-    before = args.before_context if args.before_context is not None else context
-    after = args.after_context if args.after_context is not None else context
-
-    def content(cell: Cell) -> str:
-        if args.search_in == "value" and cell.has_cached_value:
-            return cell.value_str
-        return cell.display
-
-    opts = OutputOptions(
-        content=content,
-        style=Style(_use_color(args.color)),
+    style = Style(_use_color(args.color))
+    output = OutputOptions(
+        style=style,
+        value_mode=args.search_in == "value",
         show_value=args.show_value,
         header_row=args.header,
-        before=before,
-        after=after,
+        before=args.before_context if args.before_context is not None else context,
+        after=args.after_context if args.after_context is not None else context,
         row_context=args.row,
         col_context=args.col_context,
         only_matching=args.only_matching,
         with_filename=not args.no_filename,
         max_width=args.max_width,
     )
-    formatter: Formatter
-    if args.pretty:
-        formatter = PrettyFormatter(opts)
-    elif args.json:
-        formatter = JsonFormatter(opts)
-    elif args.csv:
-        formatter = CsvFormatter(opts)
-    else:
-        formatter = LineFormatter(opts)
+    mode = "pretty" if args.pretty else "json" if args.json else "csv" if args.csv else "line"
+    cfg = SearchConfig(
+        scope=_scope(args, cell_range),
+        matcher=matcher,
+        targets=targets,
+        search_in=args.search_in,
+        invert=args.invert_match,
+        output=output,
+        mode=mode,
+        with_values=args.search_in == "value" or args.show_value or mode != "line",
+        summary_only=args.files_with_matches or args.count or args.quiet,
+        limit=1 if (args.files_with_matches or args.quiet) else args.max_count,
+    )
 
-    with_values = args.search_in == "value" or args.show_value or args.pretty or args.json or args.csv
-    summary_only = args.files_with_matches or args.count or args.quiet
-    limit = 1 if (args.files_with_matches or args.quiet) else args.max_count
-
-    def sheet_filter(name: str, hidden: bool) -> bool:
-        if args.no_hidden and hidden:
-            return False
-        return not args.sheet or any(fnmatch.fnmatch(name, g) for g in args.sheet)
-
-    object_kinds = args.objects & set(OBJECT_KINDS)
-    searcher = Searcher(matcher, args, cell_range, object_kinds, targets)
-    # --ref needs the sheet order and defined names even when names aren't searched.
-    read_kinds = object_kinds | ({"name"} if targets else set())
+    items = _list_items(paths, args.glob)
+    files = [i for i in items if not isinstance(i, UnsupportedFile)]
+    runner = Runner(search_file, cfg, choose_jobs(args.threads, files))
     any_match = had_error = False
+    printed_any = printed_group = False
     try:
-        for item in iter_files(paths or ["."], args.glob):
+        if mode == "csv":
+            csv.writer(sys.stdout, lineterminator="\n").writerow(CSV_HEADER)
+        results = runner.results(files)
+        for item in items:
             if isinstance(item, UnsupportedFile):
                 print(f"xlgrep: {item}", file=sys.stderr)
                 had_error = True
                 continue
-            try:
-                count = 0
-
-                def remaining() -> int | None:
-                    return None if limit is None else limit - count
-
-                def emit_objects(sheet_name: str | None, hidden: bool, objects: list[SheetObject]) -> None:
-                    nonlocal count
-                    if not objects or (remaining() is not None and remaining() <= 0):
-                        return
-                    matches = searcher.search_objects(objects, remaining())
-                    count += len(matches)
-                    if matches and not summary_only:
-                        formatter.write_objects(item, sheet_name, hidden, matches)
-
-                wb_objects: WorkbookObjects | None = None
-                if read_kinds:
-                    wb_objects = read_objects(item, read_kinds, raw_formula=args.raw_formula)
-                searcher.start_workbook(wb_objects)
-
-                done: set[str] = set()
-                if "cell" in args.objects:
-                    for sheet in read_sheets(item, with_values=with_values and not summary_only,
-                                             raw_formula=args.raw_formula, sheet_filter=sheet_filter):
-                        done.add(sheet.name)
-                        if remaining() is not None and remaining() <= 0:
-                            break
-                        matches = searcher.search(sheet, remaining())
-                        count += len(matches)
-                        if matches and not summary_only:
-                            formatter.write_sheet(item, sheet, matches)
-                        if wb_objects is not None:
-                            emit_objects(sheet.name, sheet.hidden, wb_objects.by_sheet.get(sheet.name, []))
-                        if count and args.quiet:
-                            return EXIT_MATCH
-                if wb_objects is not None:
-                    for info in wb_objects.sheets:
-                        if info.name not in done and sheet_filter(info.name, info.hidden):
-                            emit_objects(info.name, info.hidden, wb_objects.by_sheet[info.name])
-                    # Workbook-scoped names belong to no sheet or range.
-                    if "name" in object_kinds and not args.sheet and not cell_range:
-                        emit_objects(None, False, wb_objects.workbook_names)
-                if count and args.quiet:
-                    return EXIT_MATCH
-            except (zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ET.ParseError) as exc:
-                print(f"xlgrep: {item}: cannot read workbook ({exc})", file=sys.stderr)
+            result = next(results)
+            for error in result.errors:
+                print(f"xlgrep: {error}", file=sys.stderr)
                 had_error = True
+            if not result.count:
                 continue
-            if count:
-                any_match = True
-                if args.files_with_matches:
-                    print(opts.style.path(str(item)))
-                elif args.count:
-                    print(f"{opts.style.path(str(item))}:{count}")
-                else:
-                    formatter.end_file(item, count)
-        formatter.finish()
+            any_match = True
+            if args.quiet:
+                return EXIT_MATCH
+            if args.files_with_matches:
+                print(style.path(str(item)))
+            elif args.count:
+                print(f"{style.path(str(item))}:{result.count}")
+            elif result.output:
+                # Cross-file separators the per-file formatters can't know about.
+                if mode == "pretty" and printed_any:
+                    sys.stdout.write("\n")
+                if mode == "line" and printed_group and result.printed_group:
+                    sys.stdout.write(style.sep("--") + "\n")
+                sys.stdout.write(result.output)
+                printed_any = True
+                printed_group = printed_group or result.printed_group
         sys.stdout.flush()
     except BrokenPipeError:
-        # Output piped into e.g. `head`; exit quietly.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
+        _quiet_pipe()
         return EXIT_MATCH if any_match else EXIT_NO_MATCH
     except KeyboardInterrupt:
         return 130
+    finally:
+        runner.close()
 
     if had_error:
         return EXIT_ERROR
@@ -424,61 +299,36 @@ def list_funcs(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs:
     except ValueError as exc:
         parser.error(str(exc))
 
-    wanted = {f.upper() for f in funcs}
-
-    def name_filter(name: str) -> bool:
-        if pattern is None and not wanted:
-            return True
-        return bool(pattern is not None and pattern.search(name)) or name.upper() in wanted
-
-    def sheet_filter(name: str, hidden: bool) -> bool:
-        if args.no_hidden and hidden:
-            return False
-        return not args.sheet or any(fnmatch.fnmatch(name, g) for g in args.sheet)
-
-    counter = FuncCounter(name_filter)
-    object_kinds = args.objects & {"name", "cf", "dv"}
+    cfg = FuncConfig(scope=_scope(args, cell_range), pattern=pattern, wanted={f.upper() for f in funcs}, by=args.by)
+    items = _list_items(args.args, args.glob)
+    files = [i for i in items if not isinstance(i, UnsupportedFile)]
+    runner = Runner(count_file, cfg, choose_jobs(args.threads, files))
+    totals = FuncCounter(lambda name: True)
     had_error = False
-    for item in iter_files(args.args or ["."], args.glob):
-        if isinstance(item, UnsupportedFile):
-            print(f"xlgrep: {item}", file=sys.stderr)
-            had_error = True
-            continue
-        file = str(item)
-
-        def group(sheet: str | None):
-            return None if args.by is None else file if args.by == "file" else (file, sheet)
-
-        try:
-            objs = read_objects(item, object_kinds | {"name"}, raw_formula=True)
-            names = {o.ref.upper() for o in objs.workbook_names}
-            names |= {o.ref.upper() for lst in objs.by_sheet.values() for o in lst if o.object == "name"}
-            for info in objs.sheets:
-                if not sheet_filter(info.name, info.hidden):
-                    continue
-                for obj in objs.by_sheet[info.name]:
-                    if obj.object in object_kinds and (not cell_range or obj.in_range(cell_range)):
-                        counter.add(group(info.name), file, obj.text, names)
-            if "name" in object_kinds and not args.sheet and not cell_range:
-                for obj in objs.workbook_names:
-                    counter.add(group(None), file, obj.text, names)
-            if "cell" in args.objects:
-                for sheet in read_sheets(item, with_values=False, raw_formula=True, sheet_filter=sheet_filter):
-                    for cell in sheet.sorted_cells():
-                        if cell.is_formula and (not cell_range or cell_range.contains(cell.row, cell.col)):
-                            counter.add(group(sheet.name), file, cell.formula, names)
-        except (zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ET.ParseError) as exc:
-            print(f"xlgrep: {item}: cannot read workbook ({exc})", file=sys.stderr)
-            had_error = True
+    try:
+        results = runner.results(files)
+        for item in items:
+            if isinstance(item, UnsupportedFile):
+                print(f"xlgrep: {item}", file=sys.stderr)
+                had_error = True
+                continue
+            groups, errors = next(results)
+            for error in errors:
+                print(f"xlgrep: {error}", file=sys.stderr)
+                had_error = True
+            totals.merge(groups)
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        runner.close()
 
     style = Style(_use_color(args.color))
     mode = "json" if args.json else "csv" if args.csv else "table"
     try:
-        found = write_func_stats(counter.rows(args.sort), args.by, mode, style)
+        found = write_func_stats(totals.rows(args.sort), args.by, mode, style)
         sys.stdout.flush()
     except BrokenPipeError:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
+        _quiet_pipe()
         return EXIT_MATCH
     if had_error:
         return EXIT_ERROR

@@ -86,6 +86,17 @@ class FuncCounter:
                 seen.add(key)
             stat.files.add(file)
 
+    def merge(self, groups: dict[object, dict[str, FuncStat]]) -> None:
+        """Fold in another counter's groups (e.g. from a worker process)."""
+        for group, stats in groups.items():
+            mine = self.groups.setdefault(group, {})
+            for key, stat in stats.items():
+                if key not in mine:
+                    mine[key] = FuncStat(stat.name, stat.category)
+                mine[key].calls += stat.calls
+                mine[key].places += stat.places
+                mine[key].files |= stat.files
+
     def rows(self, sort: str) -> Iterable[tuple[object, list[FuncStat]]]:
         for group, stats in self.groups.items():
             if not stats:

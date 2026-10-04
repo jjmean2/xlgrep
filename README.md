@@ -50,6 +50,7 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | Which functions are used, and how often | `xlgrep --list-funcs .` |
 | Function usage per file / sheet | `xlgrep --list-funcs --by file -f VLOOKUP,XLOOKUP .` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
+| Parallelism (default: auto) | `-j 8`, `-j 1` for sequential |
 | Limit scope | `-g '*.xlsm'`, `-g '!*backup*'`, `--sheet 'Data*'`, `--range B2:F100`, `--no-hidden` |
 | Only some places | `--objects cells`, `--objects names,cf,dv` |
 

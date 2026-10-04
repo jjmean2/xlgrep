@@ -6,7 +6,6 @@ import csv
 import datetime as dt
 import json
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -42,9 +41,6 @@ class ObjectMatch:
     @property
     def kind(self) -> str:
         return "formula" if self.obj.is_formula else "value"
-
-
-ContentFn = Callable[[Cell], str]
 
 
 class Style:
@@ -94,8 +90,8 @@ class Style:
 
 @dataclass
 class OutputOptions:
-    content: ContentFn  # how a (context) cell is displayed
     style: Style
+    value_mode: bool = False  # --in value: show cached values rather than formulas
     show_value: bool = False
     header_row: int | None = None
     before: int = 0
@@ -105,6 +101,12 @@ class OutputOptions:
     only_matching: bool = False
     with_filename: bool = True
     max_width: int = 40
+
+    def content(self, cell: Cell) -> str:
+        """How a (context) cell is displayed."""
+        if self.value_mode and cell.has_cached_value:
+            return cell.value_str
+        return cell.display
 
 
 class Formatter:
@@ -419,11 +421,15 @@ class JsonFormatter(Formatter):
             self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+CSV_HEADER = ["file", "sheet", "object", "location", "kind", "content", "value"]
+
+
 class CsvFormatter(Formatter):
+    """Rows only; the caller writes CSV_HEADER once for the whole run."""
+
     def __init__(self, opts: OutputOptions, out: TextIO | None = None):
         super().__init__(opts, out)
         self.writer = csv.writer(self.out, lineterminator="\n")
-        self.writer.writerow(["file", "sheet", "object", "location", "kind", "content", "value"])
 
     def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
         for m in matches:
