@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from . import __version__
-from .address import CellRange, parse_range
+from .address import parse_range
 from .files import UnsupportedFile, iter_files
 from .funcs import FuncCounter
 from .matcher import build_matcher
-from .output import CSV_HEADER, OutputOptions, Style, write_func_stats
+from .output import OutputOptions, ResultStream, Style, write_func_stats
 from .refs import parse_target
-from .search import FuncConfig, Runner, Scope, SearchConfig, choose_jobs, count_file, search_file
+from .scope import Scope
+from .search import FuncConfig, Runner, SearchConfig, choose_jobs, count_file, search_file
 
 EXIT_MATCH, EXIT_NO_MATCH, EXIT_ERROR = 0, 1, 2
 
@@ -146,13 +146,8 @@ def _use_color(choice: str) -> bool:
     return sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
 
 
-def _list_items(paths: list[str], globs: list[str]) -> list[Path | UnsupportedFile]:
-    return list(iter_files(paths or ["."], globs))
-
-
-def _scope(args: argparse.Namespace, cell_range: CellRange | None) -> Scope:
-    return Scope(objects=set(args.objects), sheet_globs=list(args.sheet), no_hidden=args.no_hidden,
-                 cell_range=cell_range, raw_formula=args.raw_formula)
+def _report(message: str) -> None:
+    print(f"xlgrep: {message}", file=sys.stderr)
 
 
 def _quiet_pipe() -> None:
@@ -164,12 +159,30 @@ def _quiet_pipe() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-
-    funcs = [name.strip() for item in args.func for name in item.split(",") if name.strip()]
     if args.threads is not None and args.threads < 1:
         parser.error("-j/--threads must be at least 1")
+    funcs = [name.strip() for item in args.func for name in item.split(",") if name.strip()]
     if args.list_funcs:
-        return list_funcs(parser, args, funcs)
+        return run_list_funcs(_func_config(parser, args, funcs), args)
+    cfg, paths = _search_config(parser, args, funcs)
+    return run_search(cfg, paths, args)
+
+
+# ---------------------------------------------------------------- setup
+
+
+def _scope(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Scope:
+    try:
+        cell_range = parse_range(args.cell_range) if args.cell_range else None
+    except ValueError as exc:
+        parser.error(str(exc))
+    return Scope(objects=set(args.objects), sheet_globs=list(args.sheet), no_hidden=args.no_hidden,
+                 cell_range=cell_range, raw_formula=args.raw_formula)
+
+
+def _search_config(parser: argparse.ArgumentParser, args: argparse.Namespace,
+                   funcs: list[str]) -> tuple[SearchConfig, list[str]]:
+    """Validate the search options; returns the config and the paths to search."""
     if args.by or args.sort != "calls":
         parser.error("--by and --sort only apply to --list-funcs")
     if args.regexp or funcs or args.ref:
@@ -184,24 +197,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--ref searches formulas and can't be combined with --in value")
     try:
         targets = [parse_target(r) for r in args.ref]
-        matcher = build_matcher(
-            patterns,
-            funcs=funcs,
-            fixed=args.fixed_strings,
-            ignore_case=args.ignore_case,
-            smart_case=args.smart_case,
-            word=args.word_regexp,
-        )
-        cell_range = parse_range(args.cell_range) if args.cell_range else None
+        matcher = build_matcher(patterns, funcs=funcs, fixed=args.fixed_strings, ignore_case=args.ignore_case,
+                                smart_case=args.smart_case, word=args.word_regexp)
     except re.error as exc:
         parser.error(f"invalid pattern: {exc}")
     except ValueError as exc:
         parser.error(str(exc))
 
     context = args.context or 0
-    style = Style(_use_color(args.color))
     output = OutputOptions(
-        style=style,
+        style=Style(_use_color(args.color)),
         value_mode=args.search_in == "value",
         show_value=args.show_value,
         header_row=args.header,
@@ -213,68 +218,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         with_filename=not args.no_filename,
         max_width=args.max_width,
     )
-    mode = "pretty" if args.pretty else "json" if args.json else "csv" if args.csv else "line"
     cfg = SearchConfig(
-        scope=_scope(args, cell_range),
+        scope=_scope(parser, args),
         matcher=matcher,
         targets=targets,
         search_in=args.search_in,
         invert=args.invert_match,
         output=output,
-        mode=mode,
-        with_values=args.search_in == "value" or args.show_value or mode != "line",
+        mode="pretty" if args.pretty else "json" if args.json else "csv" if args.csv else "line",
         summary_only=args.files_with_matches or args.count or args.quiet,
         limit=1 if (args.files_with_matches or args.quiet) else args.max_count,
     )
-
-    items = _list_items(paths, args.glob)
-    files = [i for i in items if not isinstance(i, UnsupportedFile)]
-    runner = Runner(search_file, cfg, choose_jobs(args.threads, files))
-    any_match = had_error = False
-    printed_any = printed_group = False
-    try:
-        if mode == "csv":
-            csv.writer(sys.stdout, lineterminator="\n").writerow(CSV_HEADER)
-        results = runner.results(files)
-        for item in items:
-            if isinstance(item, UnsupportedFile):
-                print(f"xlgrep: {item}", file=sys.stderr)
-                had_error = True
-                continue
-            result = next(results)
-            for error in result.errors:
-                print(f"xlgrep: {error}", file=sys.stderr)
-                had_error = True
-            if not result.count:
-                continue
-            any_match = True
-            if args.quiet:
-                return EXIT_MATCH
-            if args.files_with_matches:
-                print(style.path(str(item)))
-            elif args.count:
-                print(f"{style.path(str(item))}:{result.count}")
-            elif result.output:
-                # Cross-file separators the per-file formatters can't know about.
-                if mode == "pretty" and printed_any:
-                    sys.stdout.write("\n")
-                if mode == "line" and printed_group and result.printed_group:
-                    sys.stdout.write(style.sep("--") + "\n")
-                sys.stdout.write(result.output)
-                printed_any = True
-                printed_group = printed_group or result.printed_group
-        sys.stdout.flush()
-    except BrokenPipeError:
-        _quiet_pipe()
-        return EXIT_MATCH if any_match else EXIT_NO_MATCH
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        runner.close()
-
-    if had_error:
-        return EXIT_ERROR
-    return EXIT_MATCH if any_match else EXIT_NO_MATCH
+    return cfg, paths
 
 
 _NOT_WITH_LIST_FUNCS = {
@@ -284,7 +239,8 @@ _NOT_WITH_LIST_FUNCS = {
 }
 
 
-def list_funcs(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> int:
+def _func_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> FuncConfig:
+    """Validate the --list-funcs options. All positional arguments are paths."""
     for dest, flag in _NOT_WITH_LIST_FUNCS.items():
         if getattr(args, dest) not in (None, False, []):
             parser.error(f"{flag} can't be combined with --list-funcs")
@@ -293,39 +249,92 @@ def list_funcs(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs:
     try:
         pattern = build_matcher(args.regexp, fixed=args.fixed_strings, ignore_case=args.ignore_case,
                                 smart_case=args.smart_case, word=args.word_regexp).pattern
-        cell_range = parse_range(args.cell_range) if args.cell_range else None
     except re.error as exc:
         parser.error(f"invalid pattern: {exc}")
-    except ValueError as exc:
-        parser.error(str(exc))
+    return FuncConfig(scope=_scope(parser, args), pattern=pattern, wanted={f.upper() for f in funcs}, by=args.by)
 
-    cfg = FuncConfig(scope=_scope(args, cell_range), pattern=pattern, wanted={f.upper() for f in funcs}, by=args.by)
-    items = _list_items(args.args, args.glob)
+
+# ---------------------------------------------------------------- running
+
+
+def _each_file(paths: list[str], globs: list[str], work, cfg, threads: int | None) -> Iterator[tuple[Path, object]]:
+    """Run ``work`` on every workbook, yielding (path, result) in path order.
+
+    Paths that aren't workbooks are reported and yield ``None`` as the result.
+    """
+    items = list(iter_files(paths or ["."], globs))
     files = [i for i in items if not isinstance(i, UnsupportedFile)]
-    runner = Runner(count_file, cfg, choose_jobs(args.threads, files))
-    totals = FuncCounter(lambda name: True)
-    had_error = False
+    runner = Runner(work, cfg, choose_jobs(threads, files))
     try:
         results = runner.results(files)
         for item in items:
             if isinstance(item, UnsupportedFile):
-                print(f"xlgrep: {item}", file=sys.stderr)
+                _report(str(item))
+                yield item, None
+            else:
+                yield item, next(results)
+    finally:
+        runner.close()
+
+
+def run_search(cfg: SearchConfig, paths: list[str], args: argparse.Namespace) -> int:
+    style = cfg.output.style
+    any_match = had_error = False
+    files = _each_file(paths, args.glob, search_file, cfg, args.threads)
+    try:
+        stream = ResultStream(cfg.mode, style) if not cfg.summary_only else None
+        for path, result in files:
+            if result is None:
                 had_error = True
                 continue
-            groups, errors = next(results)
+            for error in result.errors:
+                _report(error)
+                had_error = True
+            if not result.count:
+                continue
+            any_match = True
+            if args.quiet:
+                return EXIT_MATCH
+            if args.files_with_matches:
+                print(style.path(str(path)))
+            elif args.count:
+                print(f"{style.path(str(path))}:{result.count}")
+            else:
+                stream.add(result.output, result.grouped)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _quiet_pipe()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        files.close()
+    if had_error:
+        return EXIT_ERROR
+    return EXIT_MATCH if any_match else EXIT_NO_MATCH
+
+
+def run_list_funcs(cfg: FuncConfig, args: argparse.Namespace) -> int:
+    totals = FuncCounter(lambda name: True)
+    had_error = False
+    files = _each_file(args.args, args.glob, count_file, cfg, args.threads)
+    try:
+        for _path, result in files:
+            if result is None:
+                had_error = True
+                continue
+            groups, errors = result
             for error in errors:
-                print(f"xlgrep: {error}", file=sys.stderr)
+                _report(error)
                 had_error = True
             totals.merge(groups)
     except KeyboardInterrupt:
         return 130
     finally:
-        runner.close()
+        files.close()
 
-    style = Style(_use_color(args.color))
     mode = "json" if args.json else "csv" if args.csv else "table"
     try:
-        found = write_func_stats(totals.rows(args.sort), args.by, mode, style)
+        found = write_func_stats(totals.rows(args.sort), args.by, mode, Style(_use_color(args.color)))
         sys.stdout.flush()
     except BrokenPipeError:
         _quiet_pipe()

@@ -16,7 +16,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .address import CellRange, parse_range, quote_sheet
-from .package import REL_COMMENTS, SheetInfo, children as _children, local as _local, open_package, rels as _rels
+from .package import REL_COMMENTS, Package, SheetInfo, children as _children, local as _local, open_package, rels as _rels
 from .text import normalize_formula
 
 OBJECT_KINDS = ("name", "cf", "dv", "note")
@@ -66,38 +66,43 @@ def _sqref(text: str | None) -> str:
 
 
 def read_objects(path: Path, kinds: set[str], raw_formula: bool = False) -> WorkbookObjects:
+    """The objects of the given kinds in ``path``."""
     with zipfile.ZipFile(path) as zf:
-        pkg = open_package(zf)
-        wb_root, sheets = pkg.workbook, pkg.sheets
+        return read_package_objects(zf, open_package(zf), kinds, raw_formula)
 
-        by_sheet: dict[str, list[SheetObject]] = {s.name: [] for s in sheets}
-        workbook_names: list[SheetObject] = []
 
-        if "name" in kinds:
-            for names_elem in _children(wb_root, "definedNames"):
-                for dn in _children(names_elem, "definedName"):
-                    name = dn.get("name", "")
-                    # Built-ins (_xlnm.Print_Area, _xlnm._FilterDatabase) and the hidden
-                    # placeholders Excel adds for newer functions (_xlfn.XLOOKUP) are noise.
-                    if name.lower().startswith(("_xlnm.", "_xlfn.")):
-                        continue
-                    text = _formula(dn.text, raw_formula)
-                    if text is None:
-                        continue
-                    local_id = dn.get("localSheetId")
-                    sheet = sheets[int(local_id)].name if local_id is not None and int(local_id) < len(sheets) else None
-                    obj = SheetObject("name", sheet, name, text, True,
-                                      {"hidden": "true"} if dn.get("hidden") in ("1", "true") else {})
-                    (by_sheet[sheet] if sheet is not None else workbook_names).append(obj)
+def read_package_objects(zf: zipfile.ZipFile, pkg: Package, kinds: set[str],
+                         raw_formula: bool = False) -> WorkbookObjects:
+    """Like read_objects, for a workbook that is already open."""
+    sheets = pkg.sheets
+    by_sheet: dict[str, list[SheetObject]] = {s.name: [] for s in sheets}
+    workbook_names: list[SheetObject] = []
 
-        for info in sheets:
-            if info.part is None:
-                continue
-            found = by_sheet[info.name]
-            if kinds & {"cf", "dv"}:
-                found[:0] = _sheet_rules(zf, info, kinds, raw_formula)
-            if "note" in kinds:
-                found.extend(_sheet_notes(zf, info))
+    if "name" in kinds:
+        for names_elem in _children(pkg.workbook, "definedNames"):
+            for dn in _children(names_elem, "definedName"):
+                name = dn.get("name", "")
+                # Built-ins (_xlnm.Print_Area, _xlnm._FilterDatabase) and the hidden
+                # placeholders Excel adds for newer functions (_xlfn.XLOOKUP) are noise.
+                if name.lower().startswith(("_xlnm.", "_xlfn.")):
+                    continue
+                text = _formula(dn.text, raw_formula)
+                if text is None:
+                    continue
+                local_id = dn.get("localSheetId")
+                sheet = sheets[int(local_id)].name if local_id is not None and int(local_id) < len(sheets) else None
+                obj = SheetObject("name", sheet, name, text, True,
+                                  {"hidden": "true"} if dn.get("hidden") in ("1", "true") else {})
+                (by_sheet[sheet] if sheet is not None else workbook_names).append(obj)
+
+    for info in sheets:
+        if info.part is None:
+            continue
+        found = by_sheet[info.name]
+        if kinds & {"cf", "dv"}:
+            found[:0] = _sheet_rules(zf, info, kinds, raw_formula)
+        if "note" in kinds:
+            found.extend(_sheet_notes(zf, info))
 
     return WorkbookObjects(sheets, by_sheet, workbook_names)
 

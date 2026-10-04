@@ -1,4 +1,10 @@
-"""Result formatters: grep-like lines, pretty grids, JSON Lines and CSV."""
+"""Output: formatters that render one file's matches, and the stream that joins files.
+
+A formatter renders a single workbook (in a worker process when running in
+parallel). ResultStream writes the per-file outputs in order and adds what goes
+between files: the CSV header, blank lines between files in pretty mode, and "--"
+between context groups.
+"""
 
 from __future__ import annotations
 
@@ -110,22 +116,23 @@ class OutputOptions:
 
 
 class Formatter:
-    def __init__(self, opts: OutputOptions, out: TextIO | None = None):
-        self.opts = opts
-        self.out = out if out is not None else sys.stdout
+    """Renders the matches of one workbook."""
 
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+    def __init__(self, opts: OutputOptions, path: Path, out: TextIO | None = None):
+        self.opts = opts
+        self.path = path
+        self.out = out if out is not None else sys.stdout
+        self.grouped = False  # printed "--"-separated context groups (line mode)
+
+    def write_sheet(self, sheet: Sheet, matches: list[Match]) -> None:
         raise NotImplementedError
 
-    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+    def write_objects(self, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         """Matches outside cells; ``sheet`` is None for workbook-scoped names."""
         raise NotImplementedError
 
-    def end_file(self, path: Path, count: int) -> None:
-        pass
-
-    def finish(self) -> None:
-        pass
+    def end(self, count: int) -> None:
+        """Called once after the file, if anything matched."""
 
     def _value_suffix(self, cell: Cell, content: str) -> str:
         if self.opts.show_value and cell.is_formula and cell.has_cached_value and content == cell.formula:
@@ -144,43 +151,39 @@ class Formatter:
 class LineFormatter(Formatter):
     """One line per cell: ``path:Sheet!B12:content``; context lines use ``-``."""
 
-    def __init__(self, opts: OutputOptions, out: TextIO | None = None):
-        super().__init__(opts, out)
-        self._printed_group = False
-
     @property
     def _has_context(self) -> bool:
         return bool(self.opts.before or self.opts.after or self.opts.row_context)
 
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+    def write_sheet(self, sheet: Sheet, matches: list[Match]) -> None:
         if self.opts.only_matching:
             for m in matches:
                 for start, end in m.spans:
-                    self._line(path, sheet, m.cell, ":", self.opts.style.match(escape(m.text[start:end])))
+                    self._line(sheet, m.cell, ":", self.opts.style.match(escape(m.text[start:end])))
             return
         if not self._has_context:
             for m in matches:
-                self._match_line(path, sheet, m)
+                self._match_line(sheet, m)
             return
 
         by_pos = {(m.cell.row, m.cell.col): m for m in matches}
         for group in self._context_groups(sheet, matches):
-            if self._printed_group:
+            if self.grouped:
                 self.out.write(self.opts.style.sep("--") + "\n")
-            self._printed_group = True
+            self.grouped = True
             for pos in group:
                 if pos in by_pos:
-                    self._match_line(path, sheet, by_pos[pos])
+                    self._match_line(sheet, by_pos[pos])
                 else:
                     cell = sheet.cells[pos]
                     content = self.opts.content(cell)
-                    self._line(path, sheet, cell, "-", escape(content) + self._value_suffix(cell, content))
+                    self._line(sheet, cell, "-", escape(content) + self._value_suffix(cell, content))
 
-    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+    def write_objects(self, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         st = self.opts.style
         for m in matches:
             location = st.addr(m.obj.location) + st.header(f"#{m.obj.object}")
-            prefix = f"{st.path(str(path))}{st.sep(':')}" if self.opts.with_filename else ""
+            prefix = f"{st.path(str(self.path))}{st.sep(':')}" if self.opts.with_filename else ""
             if self.opts.only_matching:
                 bodies = [st.match(escape(m.text[s:e])) for s, e in m.spans]
             else:
@@ -188,17 +191,17 @@ class LineFormatter(Formatter):
             for body in bodies:
                 self.out.write(f"{prefix}{location}{st.sep(':')}{body}\n")
 
-    def _match_line(self, path: Path, sheet: Sheet, m: Match) -> None:
+    def _match_line(self, sheet: Sheet, m: Match) -> None:
         body = self.opts.style.highlight(escape(m.text), escape_spans(m.text, m.spans))
-        self._line(path, sheet, m.cell, ":", body + self._value_suffix(m.cell, m.text))
+        self._line(sheet, m.cell, ":", body + self._value_suffix(m.cell, m.text))
 
-    def _line(self, path: Path, sheet: Sheet, cell: Cell, sep: str, body: str) -> None:
+    def _line(self, sheet: Sheet, cell: Cell, sep: str, body: str) -> None:
         st = self.opts.style
         addr = st.addr(qualified(sheet.name, cell.row, cell.col))
         label = self._header_label(sheet, cell.col)
         if label is not None:
             addr += st.header(f"[{label}]")
-        prefix = f"{st.path(str(path))}{st.sep(sep)}" if self.opts.with_filename else ""
+        prefix = f"{st.path(str(self.path))}{st.sep(sep)}" if self.opts.with_filename else ""
         self.out.write(f"{prefix}{addr}{st.sep(sep)}{body}\n")
 
     def _context_groups(self, sheet: Sheet, matches: list[Match]) -> list[list[tuple[int, int]]]:
@@ -228,51 +231,45 @@ class LineFormatter(Formatter):
 class PrettyFormatter(Formatter):
     """Group by file and sheet, and render the neighbourhood of matches as a grid."""
 
-    def __init__(self, opts: OutputOptions, out: TextIO | None = None):
-        super().__init__(opts, out)
-        self._current_file: Path | None = None
-        self._current_sheet: tuple[str | None] | None = None
-        self._first_file = True
+    def __init__(self, opts: OutputOptions, path: Path, out: TextIO | None = None):
+        super().__init__(opts, path, out)
+        self._started = False
+        self._sheet: tuple[str | None] | None = None  # heading printed last; a tuple since None is a sheet
 
-    def _enter(self, path: Path, sheet: str | None, hidden: bool) -> bool:
-        """Print file/sheet headings as needed. Returns True if the sheet was already open."""
+    def _enter(self, sheet: str | None, hidden: bool) -> bool:
+        """Print the file and sheet headings as needed. True if the sheet was already open."""
         st = self.opts.style
-        if path != self._current_file:
-            if not self._first_file:
-                self.out.write("\n")
-            self._first_file = False
-            self._current_file = path
-            self._current_sheet = None
-            self.out.write(st.heading(str(path)) + "\n")
-        if self._current_sheet == (sheet,):
+        if not self._started:
+            self._started = True
+            self.out.write(st.heading(str(self.path)) + "\n")
+        if self._sheet == (sheet,):
             return True
-        self._current_sheet = (sheet,)
+        self._sheet = (sheet,)
         title = "(workbook)" if sheet is None else sheet + (" (hidden)" if hidden else "")
         self.out.write("  " + st.sheet(title) + "\n")
         return False
 
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
-        self._enter(path, sheet.name, sheet.hidden)
+    def write_sheet(self, sheet: Sheet, matches: list[Match]) -> None:
+        self._enter(sheet.name, sheet.hidden)
         for i, block in enumerate(self._blocks(sheet, matches)):
             if i:
                 self.out.write("\n")
             self._render_block(sheet, *block)
 
-    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+    def write_objects(self, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         st = self.opts.style
-        if self._enter(path, sheet, hidden):
+        if self._enter(sheet, hidden):
             self.out.write("\n")
         tags = [f"#{m.obj.object}" for m in matches]
         tag_w = max(len(t) for t in tags)
         ref_w = max(display_width(m.obj.ref) for m in matches)
-        for tag, m in zip(tags, matches):
+        for tag, m in zip(tags, matches, strict=True):
             text, spans = escape(m.text), escape_spans(m.text, m.spans)
             ref = st.addr(m.obj.ref) + " " * (ref_w - display_width(m.obj.ref))
             self.out.write(f"    {st.header(tag.ljust(tag_w))}  {ref}  {st.highlight(text, spans)}\n")
 
-    def end_file(self, path: Path, count: int) -> None:
-        if count:
-            self.out.write(self.opts.style.dim(f"  {count} match{'es' if count != 1 else ''}") + "\n")
+    def end(self, count: int) -> None:
+        self.out.write(self.opts.style.dim(f"  {count} match{'es' if count != 1 else ''}") + "\n")
 
     def _blocks(self, sheet: Sheet, matches: list[Match]):
         """Yield (rows, cols, matches_by_pos) for groups of matches with overlapping row windows."""
@@ -382,11 +379,11 @@ def _add_refs(record: dict, refs: list[RefHit] | None) -> None:
 
 
 class JsonFormatter(Formatter):
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+    def write_sheet(self, sheet: Sheet, matches: list[Match]) -> None:
         for m in matches:
             cell = m.cell
             record = {
-                "file": str(path),
+                "file": str(self.path),
                 "object": "cell",
                 "sheet": sheet.name,
                 "cell": cell_name(cell.row, cell.col),
@@ -403,10 +400,10 @@ class JsonFormatter(Formatter):
             _add_refs(record, m.refs)
             self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+    def write_objects(self, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         for m in matches:
             record = {
-                "file": str(path),
+                "file": str(self.path),
                 "object": m.obj.object,
                 "sheet": sheet,
                 "ref": m.obj.ref,
@@ -425,22 +422,51 @@ CSV_HEADER = ["file", "sheet", "object", "location", "kind", "content", "value"]
 
 
 class CsvFormatter(Formatter):
-    """Rows only; the caller writes CSV_HEADER once for the whole run."""
+    """Rows only; ResultStream writes CSV_HEADER once for the whole run."""
 
-    def __init__(self, opts: OutputOptions, out: TextIO | None = None):
-        super().__init__(opts, out)
+    def __init__(self, opts: OutputOptions, path: Path, out: TextIO | None = None):
+        super().__init__(opts, path, out)
         self.writer = csv.writer(self.out, lineterminator="\n")
 
-    def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
+    def write_sheet(self, sheet: Sheet, matches: list[Match]) -> None:
         for m in matches:
             cell = m.cell
             value = cell.value_str if cell.has_cached_value else ""
-            row = [str(path), sheet.name, "cell", cell_name(cell.row, cell.col), m.kind, m.text, value]
+            row = [str(self.path), sheet.name, "cell", cell_name(cell.row, cell.col), m.kind, m.text, value]
             self.writer.writerow(row)
 
-    def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
+    def write_objects(self, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
         for m in matches:
-            self.writer.writerow([str(path), sheet or "", m.obj.object, m.obj.ref, m.kind, m.text, ""])
+            self.writer.writerow([str(self.path), sheet or "", m.obj.object, m.obj.ref, m.kind, m.text, ""])
+
+
+FORMATTERS: dict[str, type[Formatter]] = {
+    "line": LineFormatter, "pretty": PrettyFormatter, "json": JsonFormatter, "csv": CsvFormatter,
+}
+
+
+class ResultStream:
+    """Writes the per-file outputs of a run in order, adding what goes between files."""
+
+    def __init__(self, mode: str, style: Style, out: TextIO | None = None):
+        self.mode = mode
+        self.style = style
+        self.out = out if out is not None else sys.stdout
+        self._printed = False
+        self._grouped = False
+        if mode == "csv":
+            csv.writer(self.out, lineterminator="\n").writerow(CSV_HEADER)
+
+    def add(self, output: str, grouped: bool) -> None:
+        if not output:
+            return
+        if self.mode == "pretty" and self._printed:
+            self.out.write("\n")
+        if self.mode == "line" and grouped and self._grouped:
+            self.out.write(self.style.sep("--") + "\n")
+        self.out.write(output)
+        self._printed = True
+        self._grouped = self._grouped or grouped
 
 
 def write_func_stats(groups, by: str | None, mode: str, style: Style, out: TextIO | None = None) -> bool:
@@ -490,9 +516,9 @@ def _write_func_table(stats: list[FuncStat], include_files: bool, indent: str, s
 
     def fmt(cells: list[str]) -> str:
         first = cells[0] + " " * (widths[0] - display_width(cells[0]))
-        return "  ".join([first] + [c.rjust(w) for c, w in zip(cells[1:], widths[1:])])
+        return "  ".join([first] + [c.rjust(w) for c, w in zip(cells[1:], widths[1:], strict=True)])
 
     out.write(indent + style.dim(fmt(headers)) + "\n")
-    for s, row in zip(stats, rows):
+    for s, row in zip(stats, rows, strict=True):
         tag = "" if s.category == BUILTIN else "  " + style.header(s.category)
         out.write(indent + fmt(row) + tag + "\n")

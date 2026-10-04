@@ -1,110 +1,117 @@
-"""Per-file work and running it across files, in parallel when worthwhile.
+"""Per-file work, and running it across files (in parallel when worthwhile).
 
-Everything a worker process needs travels in a picklable config; each file's
-output is rendered into a string so the parent can print results in file order.
+A worker gets a path and a picklable config, and returns the file's result with
+its output already rendered, so the parent only prints results in file order.
 """
 
 from __future__ import annotations
 
-import fnmatch
 import io
 import os
+import re
 import zipfile
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
+from typing import Generic, TypeVar
 from xml.etree import ElementTree as ET
-
-from openpyxl.utils.exceptions import InvalidFileException
 
 from .address import CellRange
 from .funcs import FuncCounter, FuncStat
 from .matcher import Matcher, merge_spans
-from .objects import SheetObject, WorkbookObjects, read_objects
-from .output import (
-    CsvFormatter,
-    Formatter,
-    JsonFormatter,
-    LineFormatter,
-    Match,
-    ObjectMatch,
-    OutputOptions,
-    PrettyFormatter,
-)
+from .objects import SheetObject
+from .output import FORMATTERS, Match, ObjectMatch, OutputOptions
 from .refs import RefFinder, RefHit, Target
-from .workbook import Cell, Sheet, read_sheets
+from .scope import Scope, ScopedWorkbook
+from .workbook import Cell
 
-READ_ERRORS = (zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ET.ParseError)
+# What a broken or unreadable workbook raises; reported per file, not fatal.
+READ_ERRORS = (zipfile.BadZipFile, KeyError, OSError, ValueError, ET.ParseError)
 
-# Below this much input, starting worker processes (each imports openpyxl) costs
-# more than it saves.
+# Below this much input, starting worker processes costs more than it saves.
 PARALLEL_MIN_BYTES = 1_000_000
 
 
-@dataclass
-class Scope:
-    """Which sheets, cells and objects to look at."""
-
-    objects: set[str]  # "cell", "name", "cf", "dv", "note"
-    sheet_globs: list[str] = field(default_factory=list)
-    no_hidden: bool = False
-    cell_range: CellRange | None = None
-    raw_formula: bool = False
-
-    def sheet_ok(self, name: str, hidden: bool) -> bool:
-        if self.no_hidden and hidden:
-            return False
-        return not self.sheet_globs or any(fnmatch.fnmatch(name, g) for g in self.sheet_globs)
-
-    @property
-    def object_kinds(self) -> set[str]:
-        return self.objects - {"cell"}
+# ---------------------------------------------------------------- searching
 
 
 @dataclass
 class SearchConfig:
     scope: Scope
     matcher: Matcher
-    targets: list[Target]
+    targets: list[Target]  # --ref ranges
     search_in: str  # "auto" | "formula" | "value"
     invert: bool
     output: OutputOptions
     mode: str  # "line" | "pretty" | "json" | "csv"
-    with_values: bool
     summary_only: bool  # -l / -c / -q: only the count matters
     limit: int | None  # max matching cells/objects per file
+
+    @property
+    def formulas_only(self) -> bool:
+        """Only formula cells can match: -f alone, or --ref (and no -v)."""
+        if self.invert:
+            return False
+        return bool(self.targets) or (self.matcher.pattern is None and self.matcher.func_pattern is not None)
+
+    @property
+    def shows_neighbours(self) -> bool:
+        out = self.output
+        return self.mode == "pretty" or bool(out.before or out.after or out.row_context or out.header_row)
 
 
 @dataclass
 class FileResult:
     count: int = 0
     output: str = ""
+    grouped: bool = False  # printed context groups (line mode); the parent adds "--" between files
     errors: list[str] = field(default_factory=list)
-    printed_group: bool = False  # line mode with context printed a group (for "--" separators)
 
 
 class Searcher:
+    """Decides which cells and objects match, and what to highlight."""
+
     def __init__(self, cfg: SearchConfig):
         self.matcher = cfg.matcher
         self.search_in = cfg.search_in
         self.invert = cfg.invert
-        self.cell_range = cfg.scope.cell_range
-        self.object_kinds = cfg.scope.object_kinds
         self.targets = cfg.targets
-        self.ref_finder: RefFinder | None = None  # set per workbook when --ref is used
+        self.ref_finder: RefFinder | None = None  # per workbook, when --ref is used
 
-    def start_workbook(self, objects: WorkbookObjects | None) -> None:
-        if not self.targets or objects is None:
-            return
-        names = {(o.sheet, o.ref.upper()): o.text for o in objects.workbook_names}
-        names.update({(o.sheet, o.ref.upper()): o.text
-                      for lst in objects.by_sheet.values() for o in lst if o.object == "name"})
-        self.ref_finder = RefFinder(self.targets, [s.name for s in objects.sheets], names)
+    def start_workbook(self, book: ScopedWorkbook) -> None:
+        if self.targets:
+            self.ref_finder = RefFinder(self.targets, book.sheet_names, book.defined_names)
 
-    def searched_text(self, cell: Cell) -> tuple[str, str] | None:
-        """The (text, kind) to match against, or None if the cell is out of scope."""
+    def search_cells(self, cells: list[Cell], sheet: str, limit: int | None) -> list[Match]:
+        matches: list[Match] = []
+        for cell in cells:
+            if limit is not None and len(matches) >= limit:
+                break
+            searched = self._searched_text(cell)
+            if searched is None or searched[0] == "":
+                continue
+            text, kind = searched
+            selected = self._select(text, kind, sheet)
+            if selected is not None:
+                matches.append(Match(cell, text, kind, *selected))
+        return matches
+
+    def search_objects(self, objects: list[SheetObject], limit: int | None) -> list[ObjectMatch]:
+        matches: list[ObjectMatch] = []
+        for obj in objects:
+            if limit is not None and len(matches) >= limit:
+                break
+            kind = "formula" if obj.is_formula else "value"
+            if self.search_in not in ("auto", kind):
+                continue
+            selected = self._select(obj.text, kind, obj.sheet, obj.areas if obj.object in ("cf", "dv") else None)
+            if selected is not None:
+                matches.append(ObjectMatch(obj, *selected))
+        return matches
+
+    def _searched_text(self, cell: Cell) -> tuple[str, str] | None:
+        """The (text, kind) to match a cell on, or None if --in rules it out."""
         if self.search_in == "formula":
             return (cell.formula, "formula") if cell.is_formula else None
         if self.search_in == "value":
@@ -113,7 +120,11 @@ class Searcher:
 
     def _select(self, text: str, kind: str, sheet: str | None,
                 applies_to: list[CellRange] | None = None) -> tuple[list, list[RefHit] | None] | None:
-        """(spans to highlight, --ref hits) if the text is selected, else None. Honours -v."""
+        """(spans to highlight, --ref hits) if the text is selected, else None. Honours -v.
+
+        Patterns and --ref combine as AND: the text must match the patterns (if any)
+        and reference a target (if any).
+        """
         if self.targets and kind != "formula":
             return None  # references only exist in formulas
         spans = self.matcher.spans(text, is_formula=kind == "formula")
@@ -130,162 +141,81 @@ class Searcher:
             spans = merge_spans(spans + [(h.start, h.end) for h in hits])
         return spans, hits
 
-    def search_objects(self, objects: list[SheetObject], limit: int | None) -> list[ObjectMatch]:
-        matches: list[ObjectMatch] = []
-        for obj in objects:
-            if limit is not None and len(matches) >= limit:
-                break
-            if obj.object not in self.object_kinds:
-                continue
-            if self.search_in == ("value" if obj.is_formula else "formula"):
-                continue
-            if self.cell_range and not obj.in_range(self.cell_range):
-                continue
-            selected = self._select(obj.text, "formula" if obj.is_formula else "value", obj.sheet,
-                                    obj.areas if obj.object in ("cf", "dv") else None)
-            if selected is not None:
-                matches.append(ObjectMatch(obj, *selected))
-        return matches
-
-    @property
-    def formulas_only(self) -> bool:
-        """Only formula cells can be selected: -f alone, or --ref (and no -v)."""
-        if self.invert:
-            return False
-        return bool(self.targets) or (self.matcher.pattern is None and self.matcher.func_pattern is not None)
-
-    def search(self, sheet: Sheet, limit: int | None) -> list[Match]:
-        matches: list[Match] = []
-        formulas_only = self.formulas_only
-        for cell in sheet.sorted_cells():
-            if limit is not None and len(matches) >= limit:
-                break
-            if formulas_only and cell.formula is None:
-                continue
-            if self.cell_range and not self.cell_range.contains(cell.row, cell.col):
-                continue
-            searched = self.searched_text(cell)
-            if searched is None or searched[0] == "":
-                continue
-            text, kind = searched
-            selected = self._select(text, kind, sheet.name)
-            if selected is not None:
-                matches.append(Match(cell, text, kind, *selected))
-        return matches
-
-
-_FORMATTERS = {"line": LineFormatter, "pretty": PrettyFormatter, "json": JsonFormatter, "csv": CsvFormatter}
-
 
 def search_file(path: Path, cfg: SearchConfig) -> FileResult:
     """Search one workbook; the result carries its rendered output."""
     buf = io.StringIO()
-    formatter: Formatter = _FORMATTERS[cfg.mode](cfg.output, buf)
+    formatter = FORMATTERS[cfg.mode](cfg.output, path, buf)
     searcher = Searcher(cfg)
-    scope = cfg.scope
-    # --ref needs the sheet order and defined names even when names aren't searched.
-    read_kinds = scope.object_kinds | ({"name"} if cfg.targets else set())
     result = FileResult()
-
-    def remaining() -> int | None:
-        return None if cfg.limit is None else cfg.limit - result.count
-
-    def done() -> bool:
-        left = remaining()
-        return left is not None and left <= 0
-
-    def emit_objects(sheet_name: str | None, hidden: bool, objects: list[SheetObject]) -> None:
-        if not objects or done():
-            return
-        matches = searcher.search_objects(objects, remaining())
-        result.count += len(matches)
-        if matches and not cfg.summary_only:
-            formatter.write_objects(path, sheet_name, hidden, matches)
-
+    # Cells that can't match are only read if they're shown around a match.
+    formulas_only = cfg.formulas_only and not cfg.shows_neighbours
     try:
-        wb_objects = read_objects(path, read_kinds, raw_formula=scope.raw_formula) if read_kinds else None
-        searcher.start_workbook(wb_objects)
-        seen: set[str] = set()
-        if "cell" in scope.objects:
-            # Other cells are only needed when they can match or are shown around a match.
-            out = cfg.output
-            neighbours = cfg.mode == "pretty" or out.before or out.after or out.row_context or out.header_row
-            formulas_only = searcher.formulas_only and not neighbours
-            for sheet in read_sheets(path, raw_formula=scope.raw_formula, sheet_filter=scope.sheet_ok,
-                                     formulas_only=formulas_only):
-                seen.add(sheet.name)
-                if done():
+        with ScopedWorkbook(path, cfg.scope, raw_formula=cfg.scope.raw_formula,
+                            formulas_only=formulas_only) as book:
+            searcher.start_workbook(book)
+            for part in book.parts():
+                if _left(cfg.limit, result.count) == 0:
                     break
-                matches = searcher.search(sheet, remaining())
-                result.count += len(matches)
-                if matches and not cfg.summary_only:
-                    formatter.write_sheet(path, sheet, matches)
-                if wb_objects is not None:
-                    emit_objects(sheet.name, sheet.hidden, wb_objects.by_sheet.get(sheet.name, []))
-        if wb_objects is not None:
-            for info in wb_objects.sheets:
-                if info.name not in seen and scope.sheet_ok(info.name, info.hidden):
-                    emit_objects(info.name, info.hidden, wb_objects.by_sheet[info.name])
-            # Workbook-scoped names belong to no sheet or range.
-            if "name" in scope.objects and not scope.sheet_globs and not scope.cell_range:
-                emit_objects(None, False, wb_objects.workbook_names)
+                cell_matches = searcher.search_cells(part.cells, part.sheet_name, _left(cfg.limit, result.count))
+                result.count += len(cell_matches)
+                object_matches = searcher.search_objects(part.objects, _left(cfg.limit, result.count))
+                result.count += len(object_matches)
+                if cfg.summary_only:
+                    continue
+                if cell_matches:
+                    formatter.write_sheet(part.sheet, cell_matches)
+                if object_matches:
+                    formatter.write_objects(part.sheet_name, part.hidden, object_matches)
     except READ_ERRORS as exc:
         result.errors.append(f"{path}: cannot read workbook ({exc})")
     if result.count and not cfg.summary_only:
-        formatter.end_file(path, result.count)
+        formatter.end(result.count)
     result.output = buf.getvalue()
-    result.printed_group = getattr(formatter, "_printed_group", False)
+    result.grouped = formatter.grouped
     return result
+
+
+def _left(limit: int | None, count: int) -> int | None:
+    """How many more matches the per-file limit allows (None: no limit)."""
+    return None if limit is None else max(0, limit - count)
+
+
+# ---------------------------------------------------------------- --list-funcs
 
 
 @dataclass
 class FuncConfig:
     scope: Scope
-    pattern: object  # compiled name regex or None
-    wanted: set[str]  # upper-cased -f names
-    by: str | None
+    pattern: re.Pattern[str] | None  # -e: regex on function names
+    wanted: set[str]  # -f: function names, upper-cased
+    by: str | None  # None | "file" | "sheet"
+
+    def name_ok(self, name: str) -> bool:
+        if self.pattern is None and not self.wanted:
+            return True
+        return bool(self.pattern is not None and self.pattern.search(name)) or name.upper() in self.wanted
 
 
 def count_file(path: Path, cfg: FuncConfig) -> tuple[dict[object, dict[str, FuncStat]], list[str]]:
-    """--list-funcs for one workbook: (group -> name -> stats, errors)."""
-    def name_filter(name: str) -> bool:
-        if cfg.pattern is None and not cfg.wanted:
-            return True
-        return bool(cfg.pattern is not None and cfg.pattern.search(name)) or name.upper() in cfg.wanted
-
-    counter = FuncCounter(name_filter)
-    scope = cfg.scope
+    """--list-funcs for one workbook: (group -> function -> stats, errors)."""
+    counter = FuncCounter(cfg.name_ok)
     file = str(path)
-    kinds = scope.objects & {"name", "cf", "dv"}
-
-    def group(sheet: str | None):
-        return None if cfg.by is None else file if cfg.by == "file" else (file, sheet)
-
     try:
-        objs = read_objects(path, kinds | {"name"}, raw_formula=True)
-        names = {o.ref.upper() for o in objs.workbook_names}
-        names |= {o.ref.upper() for lst in objs.by_sheet.values() for o in lst if o.object == "name"}
-        for info in objs.sheets:
-            if not scope.sheet_ok(info.name, info.hidden):
-                continue
-            for obj in objs.by_sheet[info.name]:
-                if obj.object in kinds and (not scope.cell_range or obj.in_range(scope.cell_range)):
-                    counter.add(group(info.name), file, obj.text, names)
-        if "name" in kinds and not scope.sheet_globs and not scope.cell_range:
-            for obj in objs.workbook_names:
-                counter.add(group(None), file, obj.text, names)
-        if "cell" in scope.objects:
-            for sheet in read_sheets(path, raw_formula=True, sheet_filter=scope.sheet_ok, formulas_only=True):
-                for cell in sheet.sorted_cells():
-                    if cell.is_formula and (not scope.cell_range or scope.cell_range.contains(cell.row, cell.col)):
-                        counter.add(group(sheet.name), file, cell.formula, names)
+        # Raw formulas: the _xlfn./_xll. prefixes tell built-ins from custom functions.
+        with ScopedWorkbook(path, cfg.scope, raw_formula=True, formulas_only=True) as book:
+            names = {name for _, name in book.defined_names}
+            for part in book.parts():
+                group = None if cfg.by is None else file if cfg.by == "file" else (file, part.sheet_name)
+                formulas = [c.formula for c in part.cells if c.formula] + [o.text for o in part.objects if o.is_formula]
+                for formula in formulas:
+                    counter.add(group, file, formula, names)
     except READ_ERRORS as exc:
         return counter.groups, [f"{path}: cannot read workbook ({exc})"]
     return counter.groups, []
 
 
-T = TypeVar("T")
-C = TypeVar("C")
+# ---------------------------------------------------------------- running
 
 
 def choose_jobs(requested: int | None, paths: list[Path]) -> int:
@@ -303,16 +233,20 @@ def choose_jobs(requested: int | None, paths: list[Path]) -> int:
     return max(1, min(len(paths), os.cpu_count() or 1))
 
 
-class Runner:
+C = TypeVar("C")  # config type
+R = TypeVar("R")  # result type
+
+
+class Runner(Generic[C, R]):
     """Applies ``work(path, cfg)`` to paths, yielding results in input order."""
 
-    def __init__(self, work: Callable[[Path, C], T], cfg: C, jobs: int):
+    def __init__(self, work: Callable[[Path, C], R], cfg: C, jobs: int):
         self.work = work
         self.cfg = cfg
         self.jobs = jobs
         self._executor: ProcessPoolExecutor | None = None
 
-    def results(self, paths: list[Path]) -> Iterator[T]:
+    def results(self, paths: list[Path]) -> Iterator[R]:
         if self.jobs <= 1:
             for path in paths:
                 yield self.work(path, self.cfg)

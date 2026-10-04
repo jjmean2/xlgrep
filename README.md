@@ -82,4 +82,4 @@ these prefixes so formulas read as they do in Excel. Use `--raw-formula` to keep
 
 Legacy `.xls` files are not supported.
 
-See [DESIGN.md](DESIGN.md) for the design and roadmap.
+See [DESIGN.md](DESIGN.md) for the design and roadmap, and [ARCHITECTURE.md](ARCHITECTURE.md) for a guide to the code.

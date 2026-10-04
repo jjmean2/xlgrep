@@ -33,7 +33,7 @@ def test_default_line_output(run):
 
 
 def test_func_search_ignores_strings_and_case(run):
-    code, out, _ = run("-f", "vlookup,XLOOKUP")
+    _, out, _ = run("-f", "vlookup,XLOOKUP")
     assert out.splitlines() == [
         "sales.xlsx:Summary!B2:=VLOOKUP(A2,Data!A:D,4,FALSE)",
         "sales.xlsx:Summary!B3:=VLOOKUP(A3,Data!A:D,4,FALSE)",

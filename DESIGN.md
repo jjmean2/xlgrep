@@ -274,7 +274,9 @@ src/xlgrep/
   objects.py   셀 밖 대상 (이름 정의, 조건부 서식, 유효성 검사, 메모) — XML 직접 파싱
   funcs.py     --list-funcs: 함수 추출, 내장/lambda/custom 분류, 집계
   refs.py      --ref: 참조 추출(정규식), 대상 범위 판정, 이름 정의 추적
+  scope.py     범위 규칙(시트·셀·대상), ScopedWorkbook: 파일을 한 번 열고 시트별로 범위 안의 것을 준다
   search.py    파일 하나 처리(Searcher, search_file, count_file), 병렬 실행(Runner)
+  package.py   xlsx 패키지 구조(workbook.xml, rels, 시트 목록)
   text.py      수식 정규화, 값 문자열화, 이스케이프, 표시 폭
   matcher.py   패턴 컴파일, 매칭 구간 계산
   address.py   셀 주소/범위 변환, 시트명 인용
@@ -320,7 +322,8 @@ src/xlgrep/
 
 1. ~~**셀 직접 읽기 (성능)**~~ — 완료. 위 "셀 읽기" 절. 공유 수식 그룹 정보는 `--stats` 때 `Cell`에 추가한다.
    - 추가 후보: 큰 파일 하나를 행 구간으로 나눠 병렬 처리(공유 수식 마스터를 먼저 모아야 함), `--ref` 사전 필터.
-2. **구조 리팩토링, 버그 수정** — 출력 상태가 포매터와 `cli.main`에 나뉜 부분, `search_file`/`count_file`의 중복 순회 등.
+2. ~~**구조 리팩토링**~~ — 완료(2026-10-04). 범위 규칙을 `scope.py`로 일원화, 포매터 = 파일 하나 + `ResultStream`,
+   `CellReader`, cli 단계 분리, 읽기 안내 [ARCHITECTURE.md](ARCHITECTURE.md). 동작 불변(v0.6.0과 22개 옵션 조합 출력 비교).
 3. **`--stats` (사용자 결정: xlgrep 플래그)** — 파일/시트별 규모 지표.
    사용 범위, 값 셀 수, 수식 셀 수, **고유 수식 패턴 수**(재구현할 로직의 양), 휘발성 함수(NOW, TODAY, RAND,
    OFFSET, INDIRECT, CELL, INFO 등), 배열·동적 배열 수식, 데이터 표, VBA 유무(`vbaProject.bin`), 사용자 정의 함수/LAMBDA,
