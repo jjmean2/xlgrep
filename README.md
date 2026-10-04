@@ -44,6 +44,9 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | Rest of the matching row | `xlgrep --row 'TODO' .` |
 | Pretty grid grouped by file and sheet | `xlgrep -p -C1 --header -f SUMIFS .` |
 | Machine-readable | `xlgrep --json ...`, `xlgrep --csv ...` |
+| Formulas referencing a range (follows defined names) | `xlgrep --ref 'Data!A:D' .` |
+| Anything referencing a sheet, before deleting it | `xlgrep --ref 'Data!' .` |
+| VLOOKUPs that read from a range | `xlgrep -f VLOOKUP --ref 'Data!A:D' .` |
 | Which functions are used, and how often | `xlgrep --list-funcs .` |
 | Function usage per file / sheet | `xlgrep --list-funcs --by file -f VLOOKUP,XLOOKUP .` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
@@ -60,6 +63,13 @@ saved (files written by tools that don't calculate have no stored results).
 Besides cells, xlgrep searches formulas outside cells — defined names, conditional formatting
 rules and data validations — and the text of cell notes. These print as `Summary!B2:B50#cf:=...`,
 `TaxRate#name:=...`, `Summary!C3#note:...`. Restrict with `--objects`.
+
+`--ref RANGE` selects formulas whose references overlap RANGE, highlighting them. Unqualified
+references resolve to the formula's own sheet, 3D references expand across sheets, relative
+references in conditional formats and validations move across the range they apply to, and
+defined names are followed (also through other names). Combined with a pattern or `-f`, both
+must match. References built from strings (`INDIRECT`), external workbooks and table references
+(`Table1[Col]`) are not resolved.
 
 `--list-funcs` prints a table of functions with their call count, the number of formulas
 using them and the number of files. Custom functions are marked `lambda` (a LAMBDA defined

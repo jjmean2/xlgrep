@@ -18,8 +18,9 @@ from . import __version__
 from .address import CellRange, parse_range
 from .files import UnsupportedFile, iter_files
 from .funcs import FuncCounter
-from .matcher import Matcher, build_matcher
+from .matcher import Matcher, build_matcher, merge_spans
 from .objects import OBJECT_KINDS, SheetObject, WorkbookObjects, read_objects
+from .refs import RefFinder, RefHit, Target, parse_target
 from .output import (
     CsvFormatter,
     Formatter,
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  xlgrep -p -C1 --header 'Total' .   pretty grid with column headers\n"
             "  xlgrep --in value -F '#N/A' .      cells whose computed value is #N/A\n"
             "  xlgrep --list-funcs .              which functions are used, and how often\n"
+            "  xlgrep --ref 'Data!A:D' .          formulas that reference columns A-D of sheet Data\n"
             "\n"
             "exit status is 0 if a cell matched, 1 if none did, 2 if an error occurred."
         ),
@@ -92,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="case-insensitive unless the pattern has an uppercase letter")
     g.add_argument("-w", "--word-regexp", action="store_true", help="match whole words only")
     g.add_argument("-v", "--invert-match", action="store_true", help="select non-empty cells that do not match")
+    g.add_argument("--ref", action="append", default=[], metavar="RANGE",
+                   help="only formulas referencing RANGE (repeatable): 'Data!A:D', \"'Raw Data'!B2\", "
+                        "'Data!' for a whole sheet, 'A1:B5' for any sheet; follows defined names. "
+                        "Combines with PATTERN/-e/-f as AND; without them positional args are all paths")
 
     g = p.add_argument_group("what to search")
     g.add_argument("--in", dest="search_in", choices=["auto", "formula", "value"], default="auto",
@@ -154,11 +160,23 @@ def _use_color(choice: str) -> bool:
 
 
 class Searcher:
-    def __init__(self, matcher: Matcher, args: argparse.Namespace, cell_range: CellRange | None):
+    def __init__(self, matcher: Matcher, args: argparse.Namespace, cell_range: CellRange | None,
+                 object_kinds: set[str], targets: list[Target]):
         self.matcher = matcher
         self.search_in = args.search_in
         self.invert = args.invert_match
         self.cell_range = cell_range
+        self.object_kinds = object_kinds
+        self.targets = targets
+        self.ref_finder: RefFinder | None = None  # set per workbook when --ref is used
+
+    def start_workbook(self, objects: WorkbookObjects | None) -> None:
+        if not self.targets or objects is None:
+            return
+        names = {(o.sheet, o.ref.upper()): o.text for o in objects.workbook_names}
+        names.update({(o.sheet, o.ref.upper()): o.text
+                      for lst in objects.by_sheet.values() for o in lst if o.object == "name"})
+        self.ref_finder = RefFinder(self.targets, [s.name for s in objects.sheets], names)
 
     def searched_text(self, cell: Cell) -> tuple[str, str] | None:
         """The (text, kind) to match against, or None if the cell is out of scope."""
@@ -168,23 +186,40 @@ class Searcher:
             return (cell.value_str, "value") if cell.has_cached_value else None
         return (cell.formula, "formula") if cell.is_formula else (cell.value_str, "value")
 
-    def _spans(self, text: str, kind: str) -> list | None:
-        """Spans to report, or None if the text isn't selected (honours -v)."""
+    def _select(self, text: str, kind: str, sheet: str | None,
+                applies_to: list[CellRange] | None = None) -> tuple[list, list[RefHit] | None] | None:
+        """(spans to highlight, --ref hits) if the text is selected, else None. Honours -v."""
+        if self.targets and kind != "formula":
+            return None  # references only exist in formulas
         spans = self.matcher.spans(text, is_formula=kind == "formula")
-        return spans if bool(spans) != self.invert else None
+        selected = bool(spans) or self.matcher.empty
+        hits = None
+        if selected and self.targets:
+            hits = self.ref_finder.find(text, sheet, applies_to) if self.ref_finder else []
+            selected = bool(hits)
+        if selected == self.invert:
+            return None
+        if self.invert:
+            return [], None
+        if hits:
+            spans = merge_spans(spans + [(h.start, h.end) for h in hits])
+        return spans, hits
 
     def search_objects(self, objects: list[SheetObject], limit: int | None) -> list[ObjectMatch]:
         matches: list[ObjectMatch] = []
         for obj in objects:
             if limit is not None and len(matches) >= limit:
                 break
+            if obj.object not in self.object_kinds:
+                continue
             if self.search_in == ("value" if obj.is_formula else "formula"):
                 continue
             if self.cell_range and not obj.in_range(self.cell_range):
                 continue
-            spans = self._spans(obj.text, "formula" if obj.is_formula else "value")
-            if spans is not None:
-                matches.append(ObjectMatch(obj, spans))
+            selected = self._select(obj.text, "formula" if obj.is_formula else "value", obj.sheet,
+                                    obj.areas if obj.object in ("cf", "dv") else None)
+            if selected is not None:
+                matches.append(ObjectMatch(obj, *selected))
         return matches
 
     def search(self, sheet: Sheet, limit: int | None) -> list[Match]:
@@ -198,9 +233,9 @@ class Searcher:
             if searched is None or searched[0] == "":
                 continue
             text, kind = searched
-            spans = self._spans(text, kind)
-            if spans is not None:
-                matches.append(Match(cell, text, kind, spans))
+            selected = self._select(text, kind, sheet.name)
+            if selected is not None:
+                matches.append(Match(cell, text, kind, *selected))
         return matches
 
 
@@ -213,14 +248,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return list_funcs(parser, args, funcs)
     if args.by or args.sort != "calls":
         parser.error("--by and --sort only apply to --list-funcs")
-    if args.regexp or funcs:
+    if args.regexp or funcs or args.ref:
         patterns, paths = args.regexp, args.args
     elif args.args:
         patterns, paths = args.args[:1], args.args[1:]
     else:
-        parser.error("no pattern given (use PATTERN, -e or -f)")
+        parser.error("no pattern given (use PATTERN, -e, -f or --ref)")
     if funcs and args.search_in == "value":
         parser.error("-f/--func searches formulas and can't be combined with --in value")
+    if args.ref and args.search_in == "value":
+        parser.error("--ref searches formulas and can't be combined with --in value")
+    try:
+        targets = [parse_target(r) for r in args.ref]
+    except ValueError as exc:
+        parser.error(str(exc))
 
     try:
         matcher = build_matcher(
@@ -279,8 +320,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return False
         return not args.sheet or any(fnmatch.fnmatch(name, g) for g in args.sheet)
 
-    searcher = Searcher(matcher, args, cell_range)
     object_kinds = args.objects & set(OBJECT_KINDS)
+    searcher = Searcher(matcher, args, cell_range, object_kinds, targets)
+    # --ref needs the sheet order and defined names even when names aren't searched.
+    read_kinds = object_kinds | ({"name"} if targets else set())
     any_match = had_error = False
     try:
         for item in iter_files(paths or ["."], args.glob):
@@ -304,8 +347,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         formatter.write_objects(item, sheet_name, hidden, matches)
 
                 wb_objects: WorkbookObjects | None = None
-                if object_kinds:
-                    wb_objects = read_objects(item, object_kinds, raw_formula=args.raw_formula)
+                if read_kinds:
+                    wb_objects = read_objects(item, read_kinds, raw_formula=args.raw_formula)
+                searcher.start_workbook(wb_objects)
 
                 done: set[str] = set()
                 if "cell" in args.objects:
@@ -327,7 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if info.name not in done and sheet_filter(info.name, info.hidden):
                             emit_objects(info.name, info.hidden, wb_objects.by_sheet[info.name])
                     # Workbook-scoped names belong to no sheet or range.
-                    if not args.sheet and not cell_range:
+                    if "name" in object_kinds and not args.sheet and not cell_range:
                         emit_objects(None, False, wb_objects.workbook_names)
                 if count and args.quiet:
                     return EXIT_MATCH
@@ -361,13 +405,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 _NOT_WITH_LIST_FUNCS = {
     "files_with_matches": "-l", "count": "-c", "quiet": "-q", "only_matching": "-o", "invert_match": "-v",
     "max_count": "-m", "after_context": "-A", "before_context": "-B", "context": "-C", "row": "--row",
-    "header": "--header", "show_value": "--show-value",
+    "header": "--header", "show_value": "--show-value", "ref": "--ref",
 }
 
 
 def list_funcs(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> int:
     for dest, flag in _NOT_WITH_LIST_FUNCS.items():
-        if getattr(args, dest) not in (None, False):
+        if getattr(args, dest) not in (None, False, []):
             parser.error(f"{flag} can't be combined with --list-funcs")
     if args.search_in == "value":
         parser.error("--list-funcs counts formulas and can't be combined with --in value")

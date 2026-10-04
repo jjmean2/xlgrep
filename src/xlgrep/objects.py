@@ -43,16 +43,12 @@ class SheetObject:
     def in_range(self, cell_range: CellRange) -> bool:
         if self.object == "name":
             return False
-        for part in self.ref.split(","):
-            r = parse_range(part)
-            if (
-                (cell_range.max_row is None or r.min_row is None or r.min_row <= cell_range.max_row)
-                and (cell_range.min_row is None or r.max_row is None or r.max_row >= cell_range.min_row)
-                and (cell_range.max_col is None or r.min_col is None or r.min_col <= cell_range.max_col)
-                and (cell_range.min_col is None or r.max_col is None or r.max_col >= cell_range.min_col)
-            ):
-                return True
-        return False
+        return any(parse_range(part).intersects(cell_range) for part in self.ref.split(","))
+
+    @property
+    def areas(self) -> list[CellRange]:
+        """The ranges a cf/dv rule applies to (or the note's cell)."""
+        return [parse_range(part) for part in self.ref.split(",")] if self.object != "name" else []
 
 
 @dataclass

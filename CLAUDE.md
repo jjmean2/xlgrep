@@ -19,6 +19,7 @@ uv build                # dist/ 에 sdist + wheel
 - `workbook.py` — openpyxl read_only로 시트별 `Cell` 격자 생성. 계산값이 필요할 때만 `data_only=True`로 두 번째 패스
 - `objects.py` — 셀 밖 대상(이름 정의, 조건부 서식, 유효성 검사, 메모). openpyxl 대신 xlsx XML을 직접 파싱
 - `funcs.py` — `--list-funcs`: Tokenizer로 함수 추출, 내장/lambda/custom 분류, 집계 (출력은 `output.write_func_stats`)
+- `refs.py` — `--ref`: 정규식으로 참조 추출(문자열·대괄호 마스킹), 대상 범위 겹침 판정, 이름 정의 연쇄 추적
 - `matcher.py` — 일반 패턴 + `-f` 함수 패턴(문자열 리터럴 마스킹 후 매칭)
 - `text.py` — `_xlfn.` 등 접두사 정규화, 값 문자열화, 이스케이프, 동아시아 문자 표시 폭
 - `output.py` — Line / Pretty / Json / Csv 포매터

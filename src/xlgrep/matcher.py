@@ -15,6 +15,11 @@ class Matcher:
     pattern: re.Pattern[str] | None  # general patterns, applied to any searched text
     func_pattern: re.Pattern[str] | None  # function calls, applied to formulas only
 
+    @property
+    def empty(self) -> bool:
+        """No patterns at all (e.g. only --ref was given): everything passes."""
+        return self.pattern is None and self.func_pattern is None
+
     def spans(self, text: str, is_formula: bool) -> list[Span]:
         found: list[Span] = []
         if self.pattern is not None:
@@ -22,7 +27,7 @@ class Matcher:
         if self.func_pattern is not None and is_formula:
             masked = mask_string_literals(text)
             found.extend(m.span() for m in self.func_pattern.finditer(masked))
-        return _merge(found)
+        return merge_spans(found)
 
 
 def build_matcher(
@@ -56,7 +61,7 @@ def build_matcher(
     return Matcher(pattern, func_pattern)
 
 
-def _merge(spans: list[Span]) -> list[Span]:
+def merge_spans(spans: list[Span]) -> list[Span]:
     if len(spans) < 2:
         return spans
     spans.sort()

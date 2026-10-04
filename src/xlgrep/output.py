@@ -15,6 +15,7 @@ from .address import cell_name, col_letter, qualified
 from .funcs import BUILTIN, FuncStat
 from .matcher import Span
 from .objects import SheetObject
+from .refs import RefHit
 from .text import char_width, display_width, escape, escape_spans
 from .workbook import Cell, Sheet
 
@@ -25,12 +26,14 @@ class Match:
     text: str  # the text that was searched
     kind: str  # "formula" or "value"
     spans: list[Span]
+    refs: list[RefHit] | None = None  # --ref hits
 
 
 @dataclass
 class ObjectMatch:
     obj: SheetObject
     spans: list[Span]
+    refs: list[RefHit] | None = None  # --ref hits
 
     @property
     def text(self) -> str:
@@ -369,6 +372,13 @@ def _json_value(value: object) -> object:
     return str(value)
 
 
+def _add_refs(record: dict, refs: list[RefHit] | None) -> None:
+    if refs is not None:
+        record["refs"] = [
+            {"start": h.start, "end": h.end, "text": h.text, **({"via": h.via} if h.via else {})} for h in refs
+        ]
+
+
 class JsonFormatter(Formatter):
     def write_sheet(self, path: Path, sheet: Sheet, matches: list[Match]) -> None:
         for m in matches:
@@ -388,6 +398,7 @@ class JsonFormatter(Formatter):
             }
             if sheet.hidden:
                 record["hidden_sheet"] = True
+            _add_refs(record, m.refs)
             self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def write_objects(self, path: Path, sheet: str | None, hidden: bool, matches: list[ObjectMatch]) -> None:
@@ -404,6 +415,7 @@ class JsonFormatter(Formatter):
             }
             if hidden:
                 record["hidden_sheet"] = True
+            _add_refs(record, m.refs)
             self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 

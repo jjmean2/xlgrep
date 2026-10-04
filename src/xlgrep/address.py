@@ -59,6 +59,14 @@ class CellRange:
             and (self.max_col is None or col <= self.max_col)
         )
 
+    def intersects(self, other: CellRange) -> bool:
+        def overlap(lo1, hi1, lo2, hi2) -> bool:
+            return (hi1 is None or lo2 is None or lo2 <= hi1) and (hi2 is None or lo1 is None or lo1 <= hi2)
+
+        return overlap(self.min_row, self.max_row, other.min_row, other.max_row) and overlap(
+            self.min_col, self.max_col, other.min_col, other.max_col
+        )
+
 
 def parse_range(text: str) -> CellRange:
     """Parse 'A1:F100', 'B2', 'A:C' or '3:10' into a CellRange."""
