@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .address import CellRange, col_index
+from .address import CellRange, col_index, col_letter
 from .text import mask_string_literals
 
 _SHEET_QUOTED = r"'(?:[^']|'')+'"
@@ -144,11 +144,18 @@ def _bounds(first: Endpoint, last: Endpoint, dr: int = 0, dc: int = 0) -> CellRa
     return CellRange(r1, c1, r2, c2)
 
 
+def mask_formula(formula: str) -> str:
+    """Blank out string literals and bracket contents, keeping offsets.
+
+    Bracket contents are table columns (Table1[[#This Row],[Qty]]) or external
+    workbook names ([1]Ext!A1); neither holds references.
+    """
+    return _BRACKET_RE.sub(lambda m: "[" + " " * (len(m.group(0)) - 2) + "]", mask_string_literals(formula))
+
+
 def scan_refs(formula: str) -> list[Ref]:
     """Cell/range references and candidate defined names in ``formula``."""
-    # Bracket contents are table columns (Table1[[#This Row],[Qty]]) or external
-    # workbook names ([1]Ext!A1); neither holds references, so blank them like strings.
-    masked = _BRACKET_RE.sub(lambda m: "[" + " " * (len(m.group(0)) - 2) + "]", mask_string_literals(formula))
+    masked = mask_formula(formula)
     refs: list[Ref] = []
     taken: list[tuple[int, int]] = []
     for m in _REF_RE.finditer(masked):
@@ -243,3 +250,63 @@ class RefFinder:
             if anchor.min_row is not None and anchor.min_col is not None and rows and cols:
                 sweep = (max(rows) - anchor.min_row, max(cols) - anchor.min_col)
         return self._hits(formula, sheet, sweep)
+
+
+class SharedFormula:
+    """A shared formula's master text, re-anchored for the other cells of its range.
+
+    Excel stores a formula filled across a range once, in the top-left cell; the
+    others hold only a reference to it. Relative parts of each reference move with
+    the cell, like openpyxl's Translator does, but the formula is parsed once and
+    each cell only does arithmetic and joins.
+    """
+
+    def __init__(self, formula: str, row: int, col: int):
+        self.formula = formula
+        self.row, self.col = row, col
+        # Literal text, or a reference endpoint: (col_abs, col, row_abs, row, original).
+        self.parts: list[str | tuple[str, int | None, str, int | None, str]] = []
+        pos = 0
+        for m in _REF_RE.finditer(mask_formula(formula)):
+            self.parts.append(formula[pos : m.start("area")])
+            sides = formula[m.start("area") : m.end("area")].split(":")
+            for i, side in enumerate(sides):
+                if i:
+                    self.parts.append(":")
+                split = _split_endpoint(side)
+                if split is None:
+                    self.parts.append(side)
+                    continue
+                col_abs, col, row_abs, row = split
+                self.parts.append((col_abs, col_index(col) if col else None, row_abs, int(row) if row else None, side))
+            pos = m.end("area")
+        self.parts.append(formula[pos:])
+        self._letters: dict[int, str] = {}
+
+    def at(self, row: int, col: int) -> str:
+        dr, dc = row - self.row, col - self.col
+        if not dr and not dc:
+            return self.formula
+        out = []
+        for part in self.parts:
+            if part.__class__ is str:
+                out.append(part)
+                continue
+            col_abs, c, row_abs, r, original = part
+            move_col = c is not None and not col_abs and dc
+            move_row = r is not None and not row_abs and dr
+            if not move_col and not move_row:
+                out.append(original)
+                continue
+            if c is None:
+                col_text = ""
+            elif move_col:
+                letters = self._letters.get(c + dc)
+                if letters is None:
+                    letters = self._letters[c + dc] = col_letter(c + dc)
+                col_text = letters
+            else:
+                col_text = col_letter(c)
+            row_text = "" if r is None else str(r + dr) if move_row else str(r)
+            out.append(f"{col_abs}{col_text}{row_abs}{row_text}")
+        return "".join(out)

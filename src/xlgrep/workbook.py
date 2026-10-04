@@ -1,20 +1,34 @@
-"""Reading workbooks into per-sheet cell grids."""
+"""Reading workbooks into per-sheet cell grids.
+
+Cells are read straight from the sheet XML instead of through openpyxl, which is
+several times slower and can't return formulas and their cached results in one
+pass. Sheets in the regular layout Excel writes are scanned with regular
+expressions; anything unusual (namespace prefixes, cells without coordinates,
+CDATA, comments, single-quoted attributes) goes through the standard XML parser.
+Both paths produce identical cells (tests/test_reader.py).
+"""
 
 from __future__ import annotations
 
-import warnings
+import html
+import re
+import zipfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
-import openpyxl
-from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+from openpyxl.styles.numbers import BUILTIN_FORMATS, is_date_format, is_timedelta_format
+from openpyxl.utils.cell import coordinate_to_tuple
+from openpyxl.utils.datetime import CALENDAR_MAC_1904, WINDOWS_EPOCH, from_excel, from_ISO8601
 
+from .address import col_index
+from .refs import SharedFormula
+from .package import REL_SHARED_STRINGS, REL_STYLES, Package, children, local, open_package
 from .text import normalize_formula, value_text
 
 
-@dataclass
+@dataclass(slots=True)
 class Cell:
     row: int
     col: int
@@ -49,76 +63,331 @@ class Sheet:
         return [self.cells[k] for k in sorted(self.cells)]
 
 
-def _formula_text(raw: object, raw_formula: bool) -> str | None:
-    if isinstance(raw, ArrayFormula):
-        text = raw.text or ""
-    elif isinstance(raw, DataTableFormula):
-        args = ",".join(str(a) for a in (raw.r1, raw.r2) if a)
-        text = f"=TABLE({args})"
-    elif isinstance(raw, str) and raw.startswith("="):
-        text = raw
-    else:
-        return None
-    return text if raw_formula else normalize_formula(text)
-
-
 def read_sheets(
     path: Path,
     *,
-    with_values: bool,
+    with_values: bool = True,
     raw_formula: bool = False,
     sheet_filter: Callable[[str, bool], bool] | None = None,
+    formulas_only: bool = False,
 ) -> Iterator[Sheet]:
     """Yield the worksheets of ``path`` that pass ``sheet_filter(name, hidden)``.
 
-    Formula cells carry the formula text; with ``with_values`` they also carry the
-    value Excel cached the last time the file was saved (requires a second pass
-    over the file, since openpyxl reads either formulas or values, not both).
+    Formula cells carry both the formula text and the value Excel cached when the
+    file was last saved. ``with_values`` is accepted for compatibility; reading the
+    cached values costs nothing extra now. ``formulas_only`` skips other cells,
+    for searches that can only match formulas and show no neighbouring cells.
     """
-    with _quiet():
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
-        values_wb = openpyxl.load_workbook(path, read_only=True, data_only=True) if with_values else None
-    try:
-        for ws in wb.worksheets:
-            hidden = ws.sheet_state != "visible"
-            if sheet_filter and not sheet_filter(ws.title, hidden):
+    with zipfile.ZipFile(path) as zf:
+        pkg = open_package(zf)
+        ctx = _context(zf, pkg, raw_formula)
+        for info in pkg.sheets:
+            if info.part is None:
                 continue
-            sheet = Sheet(ws.title, hidden)
-            # read_only sheets are parsed lazily, so warnings fire here, not at load time.
-            with _quiet():
-                for row in ws.iter_rows():
-                    for c in row:
-                        if c.value is None or not hasattr(c, "row"):
-                            continue
-                        formula = _formula_text(c.value, raw_formula)
-                        if formula is not None:
-                            cell = Cell(c.row, c.column, formula=formula)
-                        else:
-                            cell = Cell(c.row, c.column, value=c.value, has_cached_value=True)
-                        sheet.cells[(c.row, c.column)] = cell
-                if values_wb is not None:
-                    _fill_cached_values(sheet, values_wb[ws.title])
+            if sheet_filter and not sheet_filter(info.name, info.hidden):
+                continue
+            sheet = Sheet(info.name, info.hidden)
+            sheet.cells = read_cells(zf.read(info.part), ctx, formulas_only=formulas_only)
             yield sheet
-    finally:
-        wb.close()
-        if values_wb is not None:
-            values_wb.close()
 
 
-@contextmanager
-def _quiet() -> Iterator[None]:
-    """Silence openpyxl's warnings about parts it doesn't support (extensions, etc.)."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        yield
+# ---------------------------------------------------------------- context
 
 
-def _fill_cached_values(sheet: Sheet, ws) -> None:
-    for row in ws.iter_rows():
-        for c in row:
-            if c.value is None or not hasattr(c, "row"):
+@dataclass
+class _Context:
+    strings: list[str]
+    date_styles: set[int]
+    timedelta_styles: set[int]
+    epoch: object
+    raw_formula: bool
+
+
+def _context(zf: zipfile.ZipFile, pkg: Package, raw_formula: bool) -> _Context:
+    strings: list[str] = []
+    part = pkg.part_of_type(REL_SHARED_STRINGS)
+    if part and part in zf.namelist():
+        with zf.open(part) as f:
+            for _, el in ET.iterparse(f):
+                if local(el.tag) == "si":
+                    strings.append(_rich_text(el))
+                    el.clear()
+    date_styles, timedelta_styles = _date_styles(zf, pkg.part_of_type(REL_STYLES))
+    epoch = CALENDAR_MAC_1904 if pkg.date1904 else WINDOWS_EPOCH
+    return _Context(strings, date_styles, timedelta_styles, epoch, raw_formula)
+
+
+# East Asian locales show these built-in ids as dates; openpyxl doesn't list them.
+_CJK_DATE_IDS = set(range(27, 37)) | set(range(50, 59))
+
+
+def _date_styles(zf: zipfile.ZipFile, part: str | None) -> tuple[set[int], set[int]]:
+    """Indexes of cell styles (the ``s`` attribute) whose number format is a date/time."""
+    if not part or part not in zf.namelist():
+        return set(), set()
+    root = ET.fromstring(zf.read(part))
+    custom = {}
+    for fmts in children(root, "numFmts"):
+        for fmt in children(fmts, "numFmt"):
+            custom[int(fmt.get("numFmtId", "0"))] = fmt.get("formatCode", "")
+    dates, timedeltas = set(), set()
+    for xfs in children(root, "cellXfs"):
+        for idx, xf in enumerate(children(xfs, "xf")):
+            fmt_id = int(xf.get("numFmtId", "0"))
+            code = custom.get(fmt_id, BUILTIN_FORMATS.get(fmt_id))
+            if fmt_id in _CJK_DATE_IDS and fmt_id not in custom or (code and is_date_format(code)):
+                dates.add(idx)
+                if code and is_timedelta_format(code):
+                    timedeltas.add(idx)
+    return dates, timedeltas
+
+
+# ---------------------------------------------------------------- values
+
+
+_OOXML_ESCAPE_RE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def _ooxml_unescape(text: str) -> str:
+    """OOXML encodes control characters as _xHHHH_ (e.g. _x000D_ for CR)."""
+    return _OOXML_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text) if "_x" in text else text
+
+
+def _rich_text(si: ET.Element) -> str:
+    """Text of an <si>/<is> element: plain <t> and rich-text runs, without phonetic guides."""
+    parts = []
+    for child in si:
+        name = local(child.tag)
+        if name == "t":
+            parts.append(child.text or "")
+        elif name == "r":
+            parts.extend(t.text or "" for t in children(child, "t"))
+    return _ooxml_unescape("".join(parts))
+
+
+def _number(text: str) -> int | float:
+    return float(text) if ("." in text or "e" in text or "E" in text) else int(text)
+
+
+def _convert(raw: str, cell_type: str, style: int, ctx: _Context) -> object:
+    """A stored <v> value as a Python value."""
+    if cell_type == "s":
+        return ctx.strings[int(raw)]
+    if cell_type == "b":
+        return raw.strip() in ("1", "true")
+    if cell_type in ("str", "e", "inlineStr"):
+        return _ooxml_unescape(raw)
+    if cell_type == "d":
+        return from_ISO8601(raw)
+    number = _number(raw)
+    if style in ctx.date_styles:
+        try:
+            return from_excel(number, ctx.epoch, timedelta=style in ctx.timedelta_styles)
+        except (OverflowError, ValueError):
+            return "#VALUE!"
+    return number
+
+
+class _Formulas:
+    """Builds formula text, expanding shared formulas from their master cell."""
+
+    def __init__(self, raw_formula: bool):
+        self.raw_formula = raw_formula
+        self.shared: dict[str, SharedFormula] = {}
+
+    def _normal(self, text: str) -> str:
+        return text if self.raw_formula else normalize_formula(text)
+
+    def text(self, attrs: dict[str, str], body: str | None, row: int, col: int) -> str | None:
+        kind = attrs.get("t")
+        if kind == "dataTable":
+            args = ",".join(attrs[a] for a in ("r1", "r2") if attrs.get(a))
+            return self._normal(f"=TABLE({args})")
+        text = self._normal("=" + (body or ""))
+        if kind == "shared":
+            si = attrs.get("si", "")
+            if si in self.shared:
+                if not body:
+                    return self.dependent(si, row, col)
+            elif body:
+                # Normalising doesn't touch references, so the template is stored normalised
+                # and dependents skip it.
+                self.shared[si] = SharedFormula(text, row, col)
+        return text
+
+    def dependent(self, si: str, row: int, col: int) -> str:
+        """Formula of a cell that only points at shared formula ``si``."""
+        shared = self.shared.get(si)
+        return shared.at(row, col) if shared is not None else "="
+
+
+def _make_cell(row: int, col: int, cell_type: str, style: int,
+               formula: tuple[dict[str, str], str | None] | None, raw_value: str | None,
+               inline: str | None, ctx: _Context, formulas: _Formulas) -> Cell | None:
+    value: object = None
+    if cell_type == "inlineStr":
+        value = inline
+    elif raw_value is not None and raw_value != "":
+        value = _convert(raw_value, cell_type, style, ctx)
+    if formula is not None:
+        text = formulas.text(formula[0], formula[1], row, col)
+        return Cell(row, col, formula=text, value=value, has_cached_value=value is not None)
+    if value is None:
+        return None
+    return Cell(row, col, value=value, has_cached_value=True)
+
+
+# ---------------------------------------------------------------- regex path
+
+
+class _Irregular(Exception):
+    """The sheet isn't in the layout the regex scanner understands."""
+
+
+_ROOT_PREFIX_RE = re.compile(rb"<\w+:worksheet\b")
+# One C-level pass pulls out coordinate, type, style and body; the lookaheads make
+# attribute order irrelevant.
+_CELL_RE = re.compile(
+    rb'<c\b(?=[^>]*?\br="([A-Z]{1,3})(\d+)")(?:(?=[^>]*?\bt="(\w+)"))?(?:(?=[^>]*?\bs="(\d+)"))?'
+    rb"[^>]*?(?:/>|>(.*?)</c>)",
+    re.S,
+)
+_NO_COORD_RE = re.compile(rb'<c\b(?![^>]*?\br=")')
+_SINGLE_QUOTED_RE = re.compile(rb"<[^>]*='")
+_ATTR_RE = re.compile(rb'([\w:]+)="([^"]*)"')
+_F_RE = re.compile(rb"<f\b([^>]*?)(?:/>|>(.*?)</f>)", re.S)
+_SHARED_DEPENDENT_RE = re.compile(rb'<f t="shared" si="(\d+)"\s*/>(?:<v>([^<]*)</v>)?')
+_SIMPLE_INLINE_RE = re.compile(rb"<is><t(?:\s[^>]*)?>([^<]*)</t></is>")
+_V_RE = re.compile(rb"<v(?:\s[^>]*)?>(.*?)</v>", re.S)
+_IS_RE = re.compile(rb"<is>(.*?)</is>", re.S)
+_RPH_RE = re.compile(rb"<rPh\b.*?</rPh>", re.S)
+_T_RE = re.compile(rb"<t\b[^>]*>(.*?)</t>", re.S)
+
+
+def _xml_text(raw: bytes) -> str:
+    text = raw.decode("utf-8")
+    return html.unescape(text) if "&" in text else text
+
+
+def _attrs(raw: bytes) -> dict[str, str]:
+    return {k.decode(): _xml_text(v) for k, v in _ATTR_RE.findall(raw)} if raw.strip() else {}
+
+
+def _scan_regex(data: bytes, ctx: _Context, formulas_only: bool = False) -> dict[tuple[int, int], Cell]:
+    # Check for a prefixed root first: then "<sheetData" won't be found at all.
+    if _ROOT_PREFIX_RE.search(data, 0, 65536):
+        raise _Irregular("namespace prefix")
+    start = data.find(b"<sheetData")
+    end = data.rfind(b"</sheetData>")
+    if start == -1:
+        return {}
+    region = data[start:end] if end != -1 else data[start:]
+    if b"<![CDATA[" in region or b"<!--" in region:
+        raise _Irregular("unusual XML")
+    if _NO_COORD_RE.search(region):
+        raise _Irregular("cell without coordinate")
+    if _SINGLE_QUOTED_RE.search(region):
+        raise _Irregular("single-quoted attribute")
+
+    cells: dict[tuple[int, int], Cell] = {}
+    formulas = _Formulas(ctx.raw_formula)
+    strings, date_styles = ctx.strings, ctx.date_styles
+    columns: dict[bytes, int] = {}
+    for letters, digits, raw_type, raw_style, body in _CELL_RE.findall(region):
+        if not body or (formulas_only and b"<f" not in body):
+            continue  # self-closing or empty (styled but no content), or not wanted
+        col = columns.get(letters)
+        if col is None:
+            col = columns[letters] = col_index(letters.decode())
+        row = int(digits)
+        style = int(raw_style) if raw_style else 0
+
+        # Fast paths for the bulk of cells: plain numbers and shared strings.
+        if body.startswith(b"<v>") and body.endswith(b"</v>") and b"<" not in body[3:-4]:
+            raw = body[3:-4]
+            if (not raw_type or raw_type == b"n") and style not in date_styles:
+                cells[(row, col)] = Cell(row, col, value=_number(raw.decode()), has_cached_value=True)
                 continue
-            cell = sheet.cells.get((c.row, c.column))
-            if cell is not None and cell.is_formula:
-                cell.value = c.value
-                cell.has_cached_value = True
+            if raw_type == b"s":
+                cells[(row, col)] = Cell(row, col, value=strings[int(raw)], has_cached_value=True)
+                continue
+
+        # Cells that only point at a shared formula: <f t="shared" si="0"/><v>…</v>
+        if body.startswith(b'<f t="shared"'):
+            dep = _SHARED_DEPENDENT_RE.fullmatch(body)
+            if dep is not None and dep.group(1).decode() in formulas.shared:
+                raw = dep.group(2)
+                value = (_convert(_xml_text(raw), raw_type.decode() if raw_type else "n", style, ctx)
+                         if raw else None)
+                cells[(row, col)] = Cell(row, col, formula=formulas.dependent(dep.group(1).decode(), row, col),
+                                         value=value, has_cached_value=value is not None)
+                continue
+        if raw_type == b"inlineStr" and body.startswith(b"<is><t"):
+            simple = _SIMPLE_INLINE_RE.fullmatch(body)
+            if simple is not None:
+                cells[(row, col)] = Cell(row, col, value=_ooxml_unescape(_xml_text(simple.group(1))),
+                                         has_cached_value=True)
+                continue
+
+        cell_type = raw_type.decode() if raw_type else "n"
+        formula = None
+        f = _F_RE.search(body) if b"<f" in body else None
+        if f is not None:
+            formula = (_attrs(f.group(1)), _xml_text(f.group(2)) if f.group(2) is not None else None)
+        v = _V_RE.search(body) if b"<v" in body else None
+        inline = None
+        if cell_type == "inlineStr":
+            i = _IS_RE.search(body)
+            if i is not None:
+                content = _RPH_RE.sub(b"", i.group(1))
+                inline = _ooxml_unescape("".join(_xml_text(t) for t in _T_RE.findall(content)))
+        cell = _make_cell(row, col, cell_type, style, formula,
+                          _xml_text(v.group(1)) if v is not None else None, inline, ctx, formulas)
+        if cell is not None:
+            cells[(row, col)] = cell
+    return cells
+
+
+# ---------------------------------------------------------------- XML parser path
+
+
+def _scan_etree(data: bytes, ctx: _Context, formulas_only: bool = False) -> dict[tuple[int, int], Cell]:
+    """Standard-parser fallback; also handles rows/cells with implicit positions."""
+    cells: dict[tuple[int, int], Cell] = {}
+    formulas = _Formulas(ctx.raw_formula)
+    root = ET.fromstring(data)
+    for sheet_data in children(root, "sheetData"):
+        row_no = 0
+        for row in children(sheet_data, "row"):
+            row_no = int(row.get("r")) if row.get("r") else row_no + 1
+            col_no = 0
+            for c in children(row, "c"):
+                coord = c.get("r")
+                if coord:
+                    _, col_no = coordinate_to_tuple(coord)
+                else:
+                    col_no += 1
+                formula = raw_value = inline = None
+                for child in c:
+                    name = local(child.tag)
+                    if name == "f":
+                        formula = ({local(k): v for k, v in child.attrib.items()}, child.text)
+                    elif name == "v":
+                        raw_value = child.text
+                    elif name == "is":
+                        inline = _rich_text(child)
+                cell = _make_cell(row_no, col_no, c.get("t", "n"), int(c.get("s", "0") or 0),
+                                  formula, raw_value, inline, ctx, formulas)
+                if cell is not None and (cell.formula is not None or not formulas_only):
+                    cells[(row_no, col_no)] = cell
+    return cells
+
+
+def read_cells(data: bytes, ctx: _Context, *, force_etree: bool = False,
+               formulas_only: bool = False) -> dict[tuple[int, int], Cell]:
+    if not force_etree:
+        try:
+            return _scan_regex(data, ctx, formulas_only)
+        except _Irregular:
+            pass
+    return _scan_etree(data, ctx, formulas_only)

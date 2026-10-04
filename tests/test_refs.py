@@ -12,7 +12,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from xlgrep.address import CellRange, parse_range
 from xlgrep.cli import main
-from xlgrep.refs import RefFinder, Target, parse_target, scan_refs
+from openpyxl.formula.translate import Translator
+
+from xlgrep.refs import RefFinder, SharedFormula, Target, parse_target, scan_refs
 
 
 def refs_of(formula):
@@ -173,3 +175,27 @@ def test_ref_errors(run):
         run("--ref", "Data!A1", "--in", "value")
     with pytest.raises(SystemExit):
         run("--list-funcs", "--ref", "Data!A1")
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        "=A1+$B$2+B$3+$C4",
+        "=SUM(A:A)+SUM(1:1)+SUM($A:B)+SUM(2:$5)",
+        "=Sheet2!A1*'My Sheet'!$B2+Sheet1:Sheet3!C3",
+        "=LOG10(A1)+TaxRate*Z9",
+        '="A1"&A1&"B$2"',
+        "=_xlfn.XLOOKUP(A1,B:B,C:C)",
+        "=SUM(A1:B2 B2:C3)",
+        "=Z1+AZ1",
+    ],
+)
+@pytest.mark.parametrize("dest", ["C3", "D2", "AA20", "C2"])  # shared ranges extend down/right
+def test_shared_formula_matches_openpyxl_translator(formula, dest):
+    assert SharedFormula(formula, 2, 3).at(*_rc(dest)) == Translator(formula, "C2").translate_formula(dest)
+
+
+def _rc(coord):
+    from openpyxl.utils.cell import coordinate_to_tuple
+
+    return coordinate_to_tuple(coord)

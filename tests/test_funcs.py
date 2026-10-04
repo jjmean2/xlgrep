@@ -140,3 +140,15 @@ def test_no_functions_and_bad_combinations(run):
         run("-C", "1")
     with pytest.raises(SystemExit):
         main(["--by", "file", "SUM", "."])
+
+
+def test_shape_cache_keeps_digit_function_names():
+    from xlgrep.funcs import FuncCounter
+
+    counter = FuncCounter(lambda name: True)
+    for formula in ["=LOG(A1)", "=LOG10(A2)", "=DEC2BIN(A3)", "=LOG(A4)", "=SUM(A5:B5)"]:
+        counter.add(None, "f", formula, set())
+    stats = counter.groups[None]
+    assert {k: (s.calls, s.places) for k, s in stats.items()} == {
+        "LOG": (2, 2), "LOG10": (1, 1), "DEC2BIN": (1, 1), "SUM": (1, 1),
+    }

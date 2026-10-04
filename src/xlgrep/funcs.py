@@ -22,6 +22,11 @@ _FALLBACK_RE = re.compile(r"(?<![\w.])([A-Za-z_\\][\w.]*)\s*\(")
 
 BUILTIN, LAMBDA, CUSTOM = "builtin", "lambda", "custom"
 
+# Row numbers of cell references (A1 -> A, $B$2 -> $B$). Formulas filled down a
+# column then share one "shape" and one tokenisation. Digits before "(" or inside
+# names (LOG10(, DEC2BIN() are kept, so function names never collide.
+_SHAPE_RE = re.compile(r"(?<=[A-Za-z$])\d+(?![\w(])")
+
 
 def function_calls(formula: str) -> list[str]:
     """Function names called in ``formula`` (raw, prefixes kept), in order."""
@@ -68,11 +73,16 @@ class FuncCounter:
     def __init__(self, name_filter):
         self.name_filter = name_filter  # callable(display_name) -> bool
         self.groups: dict[object, dict[str, FuncStat]] = {}
+        self._calls: dict[str, list[str]] = {}  # formula shape -> function_calls()
 
     def add(self, group: object, file: str, formula: str, defined_names: set[str]) -> None:
         seen: set[str] = set()
         stats = self.groups.setdefault(group, {})
-        for raw in function_calls(formula):
+        shape = _SHAPE_RE.sub("", formula)
+        calls = self._calls.get(shape)
+        if calls is None:
+            calls = self._calls[shape] = function_calls(formula)
+        for raw in calls:
             name, category = classify(raw, defined_names)
             if not self.name_filter(name):
                 continue

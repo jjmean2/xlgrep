@@ -9,7 +9,6 @@ that reference other sheets.
 
 from __future__ import annotations
 
-import posixpath
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -17,13 +16,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .address import CellRange, parse_range, quote_sheet
+from .package import REL_COMMENTS, SheetInfo, children as _children, local as _local, open_package, rels as _rels
 from .text import normalize_formula
 
 OBJECT_KINDS = ("name", "cf", "dv", "note")
-
-_REL_SHEET = "/worksheet"
-_REL_COMMENTS = "/comments"
-_REL_OFFICE_DOC = "/officeDocument"
 
 
 @dataclass
@@ -52,41 +48,10 @@ class SheetObject:
 
 
 @dataclass
-class SheetInfo:
-    name: str
-    hidden: bool
-    part: str | None  # zip path of the worksheet XML; None for chartsheets
-
-
-@dataclass
 class WorkbookObjects:
     sheets: list[SheetInfo]
     by_sheet: dict[str, list[SheetObject]]
     workbook_names: list[SheetObject]
-
-
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _children(elem: ET.Element, name: str) -> Iterator[ET.Element]:
-    return (c for c in elem if _local(c.tag) == name)
-
-
-def _rels(zf: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:
-    """Relationship id -> (type, resolved zip path) for ``part``."""
-    base, name = posixpath.split(part)
-    rels_path = posixpath.join(base, "_rels", name + ".rels")
-    if rels_path not in zf.namelist():
-        return {}
-    out = {}
-    for rel in ET.fromstring(zf.read(rels_path)):
-        target = rel.get("Target", "")
-        if rel.get("TargetMode") == "External":
-            continue
-        resolved = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(base, target))
-        out[rel.get("Id", "")] = (rel.get("Type", ""), resolved)
-    return out
 
 
 def _formula(text: str | None, raw_formula: bool) -> str | None:
@@ -102,21 +67,8 @@ def _sqref(text: str | None) -> str:
 
 def read_objects(path: Path, kinds: set[str], raw_formula: bool = False) -> WorkbookObjects:
     with zipfile.ZipFile(path) as zf:
-        root_rels = _rels(zf, "")
-        wb_part = next((p for t, p in root_rels.values() if t.endswith(_REL_OFFICE_DOC)), "xl/workbook.xml")
-        wb_rels = _rels(zf, wb_part)
-        wb_root = ET.fromstring(zf.read(wb_part))
-
-        sheets: list[SheetInfo] = []
-        for sheets_elem in _children(wb_root, "sheets"):
-            for s in _children(sheets_elem, "sheet"):
-                rid = next((v for k, v in s.attrib.items() if _local(k) == "id"), "")
-                rel_type, part = wb_rels.get(rid, ("", ""))
-                sheets.append(SheetInfo(
-                    name=s.get("name", ""),
-                    hidden=s.get("state", "visible") != "visible",
-                    part=part if rel_type.endswith(_REL_SHEET) else None,
-                ))
+        pkg = open_package(zf)
+        wb_root, sheets = pkg.workbook, pkg.sheets
 
         by_sheet: dict[str, list[SheetObject]] = {s.name: [] for s in sheets}
         workbook_names: list[SheetObject] = []
@@ -224,7 +176,7 @@ def _rule_objects(kind, sheet, ref, texts, raw_formula, detail) -> list[SheetObj
 def _sheet_notes(zf: zipfile.ZipFile, info: SheetInfo) -> list[SheetObject]:
     out = []
     for rel_type, part in _rels(zf, info.part).values():
-        if not rel_type.endswith(_REL_COMMENTS) or part not in zf.namelist():
+        if not rel_type.endswith(REL_COMMENTS) or part not in zf.namelist():
             continue
         root = ET.fromstring(zf.read(part))
         for comment_list in _children(root, "commentList"):

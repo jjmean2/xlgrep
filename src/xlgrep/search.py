@@ -147,11 +147,21 @@ class Searcher:
                 matches.append(ObjectMatch(obj, *selected))
         return matches
 
+    @property
+    def formulas_only(self) -> bool:
+        """Only formula cells can be selected: -f alone, or --ref (and no -v)."""
+        if self.invert:
+            return False
+        return bool(self.targets) or (self.matcher.pattern is None and self.matcher.func_pattern is not None)
+
     def search(self, sheet: Sheet, limit: int | None) -> list[Match]:
         matches: list[Match] = []
+        formulas_only = self.formulas_only
         for cell in sheet.sorted_cells():
             if limit is not None and len(matches) >= limit:
                 break
+            if formulas_only and cell.formula is None:
+                continue
             if self.cell_range and not self.cell_range.contains(cell.row, cell.col):
                 continue
             searched = self.searched_text(cell)
@@ -197,8 +207,12 @@ def search_file(path: Path, cfg: SearchConfig) -> FileResult:
         searcher.start_workbook(wb_objects)
         seen: set[str] = set()
         if "cell" in scope.objects:
-            for sheet in read_sheets(path, with_values=cfg.with_values and not cfg.summary_only,
-                                     raw_formula=scope.raw_formula, sheet_filter=scope.sheet_ok):
+            # Other cells are only needed when they can match or are shown around a match.
+            out = cfg.output
+            neighbours = cfg.mode == "pretty" or out.before or out.after or out.row_context or out.header_row
+            formulas_only = searcher.formulas_only and not neighbours
+            for sheet in read_sheets(path, raw_formula=scope.raw_formula, sheet_filter=scope.sheet_ok,
+                                     formulas_only=formulas_only):
                 seen.add(sheet.name)
                 if done():
                     break
@@ -261,7 +275,7 @@ def count_file(path: Path, cfg: FuncConfig) -> tuple[dict[object, dict[str, Func
             for obj in objs.workbook_names:
                 counter.add(group(None), file, obj.text, names)
         if "cell" in scope.objects:
-            for sheet in read_sheets(path, with_values=False, raw_formula=True, sheet_filter=scope.sheet_ok):
+            for sheet in read_sheets(path, raw_formula=True, sheet_filter=scope.sheet_ok, formulas_only=True):
                 for cell in sheet.sorted_cells():
                     if cell.is_formula and (not scope.cell_range or scope.cell_range.contains(cell.row, cell.col)):
                         counter.add(group(sheet.name), file, cell.formula, names)
