@@ -69,6 +69,11 @@ def test_ref_finder_names_3d_and_sweep():
     assert [h.text for h in finder.find("=SUM(Summary:Other!C5)", "Summary")] == ["Summary:Other!C5"]
     assert finder.find("=Data!E1", "Summary") == []
 
+    # Row-only endpoint: the "$" in "$5" fixes the row, so it must not sweep.
+    rows = RefFinder([parse_target("Summary!A30")], ["Summary"], {})
+    assert rows.find("=SUM(2:$5)", "Summary", [parse_range("B2:B50")]) != []
+    assert rows.find("=SUM($2:$5)", "Summary", [parse_range("B2:B50")]) == []
+
     sweep = RefFinder([parse_target("Summary!A40")], ["Summary"], {})
     assert [h.text for h in sweep.find("=$A2>1", "Summary", [parse_range("B2:B50")])] == ["$A2"]
     assert sweep.find("=$A$2>1", "Summary", [parse_range("B2:B50")]) == []

@@ -83,11 +83,22 @@ def _parse_prefix(prefix: str | None) -> tuple[tuple[str, ...] | None, bool]:
     return tuple(body.split(":", 1)), external
 
 
-def _endpoint(text: str) -> Endpoint:
+def _split_endpoint(text: str) -> tuple[str, str | None, str, str | None] | None:
+    """('$', 'A', '', '5') for '$A5'. In a row-only endpoint like '$5' the '$' is the row's."""
     m = _ENDPOINT_RE.match(text)
     if not m:
-        raise ValueError(text)
+        return None
     col_abs, col, row_abs, row = m.groups()
+    if col is None and col_abs:
+        col_abs, row_abs = "", col_abs
+    return col_abs, col, row_abs, row
+
+
+def _endpoint(text: str) -> Endpoint:
+    parts = _split_endpoint(text)
+    if parts is None:
+        raise ValueError(text)
+    col_abs, col, row_abs, row = parts
     return Endpoint(int(row) if row else None, col_index(col) if col else None, bool(row_abs), bool(col_abs))
 
 
