@@ -12,11 +12,15 @@ import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from .address import CellRange
 from .objects import SheetObject, read_package_objects
-from .package import open_package
+from .package import SheetInfo, open_package
 from .workbook import Cell, CellReader, Sheet
+
+# What a broken or unreadable workbook raises; reported per file, not fatal.
+READ_ERRORS = (zipfile.BadZipFile, KeyError, OSError, ValueError, ET.ParseError)
 
 
 @dataclass
@@ -46,6 +50,7 @@ class Part:
 
     sheet_name: str | None
     hidden: bool
+    info: SheetInfo | None  # the sheet's package entry (None for workbook-scoped names)
     sheet: Sheet | None  # every cell read from the sheet, for showing neighbours
     cells: list[Cell]  # the cells in scope, in reading order
     objects: list[SheetObject]  # the objects in scope
@@ -62,20 +67,20 @@ class ScopedWorkbook:
     def __init__(self, path: Path, scope: Scope, *, raw_formula: bool, formulas_only: bool = False):
         self.scope = scope
         self.formulas_only = formulas_only
-        self._zf = zipfile.ZipFile(path)
+        self.zip = zipfile.ZipFile(path)
         try:
-            pkg = open_package(self._zf)
-            self.objects = read_package_objects(self._zf, pkg, scope.object_kinds | {"name"}, raw_formula)
-            self._cells = CellReader(self._zf, pkg, raw_formula) if "cell" in scope.objects else None
+            self.package = open_package(self.zip)
+            self.objects = read_package_objects(self.zip, self.package, scope.object_kinds | {"name"}, raw_formula)
+            self._cells = CellReader(self.zip, self.package, raw_formula) if "cell" in scope.objects else None
         except BaseException:
-            self._zf.close()
+            self.zip.close()
             raise
 
     def __enter__(self) -> ScopedWorkbook:
         return self
 
     def __exit__(self, *exc) -> None:
-        self._zf.close()
+        self.zip.close()
 
     @property
     def sheet_names(self) -> list[str]:
@@ -103,7 +108,7 @@ class ScopedWorkbook:
                 cells = [c for c in sheet.sorted_cells() if rng is None or rng.contains(c.row, c.col)]
             objects = [o for o in self.objects.by_sheet[info.name]
                        if o.object in kinds and (rng is None or o.in_range(rng))]
-            yield Part(info.name, info.hidden, sheet, cells or [], objects)
+            yield Part(info.name, info.hidden, info, sheet, cells or [], objects)
         # Workbook-scoped names belong to no sheet or range, so --sheet/--range exclude them.
         if "name" in kinds and not scope.sheet_globs and rng is None:
-            yield Part(None, False, None, [], list(self.objects.workbook_names))
+            yield Part(None, False, None, None, [], list(self.objects.workbook_names))

@@ -12,12 +12,13 @@ from pathlib import Path
 from . import __version__
 from .address import parse_range
 from .files import UnsupportedFile, iter_files
-from .funcs import FuncCounter
+from .funcs import FuncCounter, write_func_stats
 from .matcher import build_matcher
-from .output import OutputOptions, ResultStream, Style, write_func_stats
+from .output import OutputOptions, ResultStream, Style
 from .refs import parse_target
 from .scope import Scope
 from .search import FuncConfig, Runner, SearchConfig, choose_jobs, count_file, search_file
+from .stats import FileStats, StatsConfig, stats_file, write_stats
 
 EXIT_MATCH, EXIT_NO_MATCH, EXIT_ERROR = 0, 1, 2
 
@@ -48,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
         usage=(
             "xlgrep [OPTIONS] PATTERN [PATH ...]\n"
             "       xlgrep [OPTIONS] (-e PATTERN | -f FUNCS)... [PATH ...]\n"
-            "       xlgrep --list-funcs [--by file|sheet] [-e PATTERN | -f FUNCS]... [PATH ...]"
+            "       xlgrep --list-funcs [--by file|sheet] [-e PATTERN | -f FUNCS]... [PATH ...]\n"
+            "       xlgrep --stats [--by sheet] [PATH ...]"
         ),
         description="Search the cells of Excel workbooks (.xlsx/.xlsm/.xltx/.xltm) like grep.",
         epilog=(
@@ -59,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  xlgrep --in value -F '#N/A' .      cells whose computed value is #N/A\n"
             "  xlgrep --list-funcs .              which functions are used, and how often\n"
             "  xlgrep --ref 'Data!A:D' .          formulas that reference columns A-D of sheet Data\n"
+            "  xlgrep --stats -p .                size and migration-relevant metrics per workbook\n"
             "\n"
             "exit status is 0 if a cell matched, 1 if none did, 2 if an error occurred."
         ),
@@ -116,11 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--color", choices=["auto", "always", "never"], default="auto", help="colorize output (default: auto)")
     g.add_argument("--max-width", type=int, default=40, metavar="N", help="pretty mode: max cell width (default 40, 0 = unlimited)")
 
-    g = p.add_argument_group("function summary")
-    g.add_argument("--list-funcs", action="store_true",
-                   help="count the functions used in formulas instead of printing matches; "
-                        "-e/-f then filter function names and all positional args are paths")
-    g.add_argument("--by", choices=["file", "sheet"], help="--list-funcs: break counts down per file or sheet")
+    g = p.add_argument_group("summaries (instead of matches; positional args are all paths)")
+    summary = g.add_mutually_exclusive_group()
+    summary.add_argument("--list-funcs", action="store_true",
+                         help="count the functions used in formulas; -e/-f filter function names")
+    summary.add_argument("--stats", action="store_true",
+                         help="size, formulas, unique formulas, volatile functions, errors, VBA, links … "
+                              "per workbook (-p: all metrics as cards; --json/--csv: everything)")
+    g.add_argument("--by", choices=["file", "sheet"],
+                   help="--list-funcs: break counts down per file or sheet; --stats: a row per sheet")
     g.add_argument("--sort", choices=["calls", "name"], default="calls",
                    help="--list-funcs: order by call count (default) or name")
 
@@ -164,6 +171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     funcs = [name.strip() for item in args.func for name in item.split(",") if name.strip()]
     if args.list_funcs:
         return run_list_funcs(_func_config(parser, args, funcs), args)
+    if args.stats:
+        return run_stats(_stats_config(parser, args, funcs), args)
     cfg, paths = _search_config(parser, args, funcs)
     return run_search(cfg, paths, args)
 
@@ -184,7 +193,7 @@ def _search_config(parser: argparse.ArgumentParser, args: argparse.Namespace,
                    funcs: list[str]) -> tuple[SearchConfig, list[str]]:
     """Validate the search options; returns the config and the paths to search."""
     if args.by or args.sort != "calls":
-        parser.error("--by and --sort only apply to --list-funcs")
+        parser.error("--by and --sort only apply to --list-funcs and --stats")
     if args.regexp or funcs or args.ref:
         patterns, paths = args.regexp, args.args
     elif args.args:
@@ -239,13 +248,18 @@ _NOT_WITH_LIST_FUNCS = {
 }
 
 
-def _func_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> FuncConfig:
-    """Validate the --list-funcs options. All positional arguments are paths."""
+def _check_summary(parser: argparse.ArgumentParser, args: argparse.Namespace, mode: str) -> None:
+    """Reject the options that only make sense for printing matches."""
     for dest, flag in _NOT_WITH_LIST_FUNCS.items():
         if getattr(args, dest) not in (None, False, []):
-            parser.error(f"{flag} can't be combined with --list-funcs")
+            parser.error(f"{flag} can't be combined with {mode}")
     if args.search_in == "value":
-        parser.error("--list-funcs counts formulas and can't be combined with --in value")
+        parser.error(f"{mode} counts formulas and can't be combined with --in value")
+
+
+def _func_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> FuncConfig:
+    """Validate the --list-funcs options. All positional arguments are paths."""
+    _check_summary(parser, args, "--list-funcs")
     try:
         pattern = build_matcher(args.regexp, fixed=args.fixed_strings, ignore_case=args.ignore_case,
                                 smart_case=args.smart_case, word=args.word_regexp).pattern
@@ -311,6 +325,47 @@ def run_search(cfg: SearchConfig, paths: list[str], args: argparse.Namespace) ->
     if had_error:
         return EXIT_ERROR
     return EXIT_MATCH if any_match else EXIT_NO_MATCH
+
+
+def _stats_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> StatsConfig:
+    """Validate the --stats options. All positional arguments are paths."""
+    _check_summary(parser, args, "--stats")
+    if args.regexp or funcs:
+        parser.error("-e/-f filter --list-funcs; --stats takes no patterns")
+    if args.sort != "calls":
+        parser.error("--sort only applies to --list-funcs")
+    return StatsConfig(scope=_scope(parser, args), by=args.by)
+
+
+def run_stats(cfg: StatsConfig, args: argparse.Namespace) -> int:
+    collected: list[FileStats] = []
+    had_error = False
+    files = _each_file(args.args, args.glob, stats_file, cfg, args.threads)
+    try:
+        for _path, result in files:
+            if result is None:
+                had_error = True
+                continue
+            for error in result.errors:
+                _report(error)
+                had_error = True
+            if not result.errors:
+                collected.append(result)
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        files.close()
+
+    mode = "json" if args.json else "csv" if args.csv else "cards" if args.pretty else "table"
+    try:
+        if collected:
+            write_stats(collected, cfg.by, mode, Style(_use_color(args.color)))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _quiet_pipe()
+    if had_error:
+        return EXIT_ERROR
+    return EXIT_MATCH if collected else EXIT_NO_MATCH
 
 
 def run_list_funcs(cfg: FuncConfig, args: argparse.Namespace) -> int:

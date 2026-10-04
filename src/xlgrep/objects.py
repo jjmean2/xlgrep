@@ -16,7 +16,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .address import CellRange, parse_range, quote_sheet
-from .package import REL_COMMENTS, Package, SheetInfo, children as _children, local as _local, open_package, rels as _rels
+from .package import REL_COMMENTS, Package, SheetInfo, open_package
+from .package import children as _children
+from .package import local as _local
+from .package import rels as _rels
 from .text import normalize_formula
 
 OBJECT_KINDS = ("name", "cf", "dv", "note")
@@ -167,6 +170,22 @@ def _sheet_rules(zf: zipfile.ZipFile, info: SheetInfo, kinds: set[str], raw_form
                             out += _rule_objects("dv", info.name, ref, texts, raw_formula,
                                                  {"dv_type": dv.get("type", "any"), "part": part})
     return out
+
+
+def count_rules(zf: zipfile.ZipFile, info: SheetInfo) -> tuple[int, int]:
+    """(conditional formatting rules, data validations) on a worksheet, including
+    the x14 extension blocks. Counts rules, not formulas (a "between" rule has two)."""
+    if info.part is None:
+        return 0, 0
+    root = _sheet_tail(zf, info.part)
+    cf = dv = 0
+    for elem in root.iter():
+        name = _local(elem.tag)
+        if name == "cfRule":
+            cf += 1
+        elif name == "dataValidation":
+            dv += 1
+    return cf, dv
 
 
 def _rule_objects(kind, sheet, ref, texts, raw_formula, detail) -> list[SheetObject]:

@@ -310,3 +310,34 @@ class SharedFormula:
             row_text = "" if r is None else str(r + dr) if move_row else str(r)
             out.append(f"{col_abs}{col_text}{row_abs}{row_text}")
         return "".join(out)
+
+
+def relative_form(formula: str, row: int, col: int) -> str:
+    """``formula`` with its references written relative to the cell at (row, col),
+    R1C1-style: =B2*C2 in D2 and =B3*C3 in D3 both become =RC[-2]*RC[-1].
+
+    Formulas that do the same thing from different cells get the same text, which
+    is how --stats counts distinct formulas.
+    """
+    out, pos = [], 0
+    for m in _REF_RE.finditer(mask_formula(formula)):
+        out.append(formula[pos : m.start("area")])
+        sides = formula[m.start("area") : m.end("area")].split(":")
+        out.append(":".join(_relative_endpoint(side, row, col) for side in sides))
+        pos = m.end("area")
+    out.append(formula[pos:])
+    return "".join(out)
+
+
+def _relative_endpoint(text: str, row: int, col: int) -> str:
+    parts = _split_endpoint(text)
+    if parts is None:
+        return text
+    col_abs, c, row_abs, r = parts
+    row_part = "" if r is None else f"R{r}" if row_abs else _offset("R", int(r) - row)
+    col_part = "" if c is None else f"C{col_index(c)}" if col_abs else _offset("C", col_index(c) - col)
+    return row_part + col_part
+
+
+def _offset(axis: str, delta: int) -> str:
+    return axis if delta == 0 else f"{axis}[{delta}]"

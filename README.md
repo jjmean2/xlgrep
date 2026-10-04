@@ -48,6 +48,7 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | Anything referencing a sheet, before deleting it | `xlgrep --ref 'Data!' .` |
 | VLOOKUPs that read from a range | `xlgrep -f VLOOKUP --ref 'Data!A:D' .` |
 | Which functions are used, and how often | `xlgrep --list-funcs .` |
+| Size and migration-relevant metrics per workbook | `xlgrep --stats .`, `--stats -p .`, `--stats --by sheet --csv .` |
 | Function usage per file / sheet | `xlgrep --list-funcs --by file -f VLOOKUP,XLOOKUP .` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
 | Parallelism (default: auto) | `-j 8`, `-j 1` for sequential |
@@ -71,6 +72,13 @@ references in conditional formats and validations move across the range they app
 defined names are followed (also through other names). Combined with a pattern or `-f`, both
 must match. References built from strings (`INDIRECT`), external workbooks and table references
 (`Table1[Col]`) are not resolved.
+
+`--stats` prints, per workbook: size, sheets, non-empty cells, formulas, **unique formulas**
+(formulas compared in relative R1C1 form, so a formula filled down a column counts once),
+formulas calling volatile functions, array formulas, cells showing errors, VBA and external
+links. `-p` shows every metric (custom functions, LAMBDAs, conditional formats, validations,
+names, notes, tables, pivot tables, charts, data connections) as cards; `--json`/`--csv`
+include them all; `--by sheet` gives a row per sheet.
 
 `--list-funcs` prints a table of functions with their call count, the number of formulas
 using them and the number of files. Custom functions are marked `lambda` (a LAMBDA defined

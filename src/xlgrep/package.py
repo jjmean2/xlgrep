@@ -16,6 +16,10 @@ REL_COMMENTS = "/comments"
 REL_OFFICE_DOC = "/officeDocument"
 REL_SHARED_STRINGS = "/sharedStrings"
 REL_STYLES = "/styles"
+REL_TABLE = "/table"
+REL_PIVOT_TABLE = "/pivotTable"
+REL_DRAWING = "/drawing"
+REL_CHART = "/chart"
 
 
 def local(tag: str) -> str:
@@ -81,3 +85,18 @@ def open_package(zf: zipfile.ZipFile) -> Package:
                 part=part if rel_type.endswith(REL_SHEET) else None,
             ))
     return Package(wb_part, wb_root, wb_rels, sheets)
+
+
+def sheet_parts(zf: zipfile.ZipFile, info: SheetInfo) -> tuple[int, int, int]:
+    """(tables, pivot tables, charts) attached to a worksheet."""
+    if info.part is None:
+        return 0, 0, 0
+    tables = pivots = charts = 0
+    for rel_type, part in rels(zf, info.part).values():
+        if rel_type.endswith(REL_TABLE):
+            tables += 1
+        elif rel_type.endswith(REL_PIVOT_TABLE):
+            pivots += 1
+        elif rel_type.endswith(REL_DRAWING):
+            charts += sum(1 for t, _ in rels(zf, part).values() if t.endswith(REL_CHART))
+    return tables, pivots, charts

@@ -26,8 +26,9 @@ cli.main
  ← 부모 프로세스: output.ResultStream 이 파일 순서대로 출력 (파일 사이 구분자 담당)
 ```
 
-`--list-funcs`는 같은 길을 가되 `search_file` 대신 `count_file`이 함수를 세고(`funcs.py`), 마지막에
-`output.write_func_stats`가 표를 그린다.
+요약 모드도 같은 길을 간다. `--list-funcs`는 `search_file` 대신 `count_file`이 함수를 세고 `funcs.write_func_stats`가
+표를 그린다. `--stats`는 `stats.stats_file`이 지표를 모으고 `stats.write_stats`가 그린다. 요약 기능은 수집과 출력을
+**자기 모듈 안에** 두고(`funcs.py`, `stats.py`), `output.py`는 검색 결과 출력만 맡는다.
 
 **핵심 원칙 세 가지**만 기억하면 대부분의 구조가 설명된다.
 
@@ -83,10 +84,11 @@ xl/comments1.xml                  → 셀 메모
 | 7 | `objects.py` | 205 | 셀 밖 대상. 시트 XML에서 `<sheetData>`를 잘라내고 뒷부분만 파싱하는 요령(`_sheet_tail`) |
 | 8 | `scope.py` | 110 | `ScopedWorkbook.parts()`: 시트 순서대로 (그 시트의 범위 안 셀, 대상), 마지막에 통합문서 이름 |
 | 9 | `refs.py` | 310 | `--ref`. 참조 스캔 → 시트·범위로 해석 → 대상과 겹침 판정. 이름은 재귀 추적. 끝의 `SharedFormula` |
-| 10 | `funcs.py` | 120 | 함수 추출(Tokenizer), 내장/lambda/custom 분류, 집계 |
-| 11 | `search.py` | 265 | `Searcher._select`가 매칭의 핵심(패턴 AND --ref, -v). `search_file`은 parts를 돌며 찾고 렌더링 |
-| 12 | `output.py` | 525 | 포매터 4종 + `ResultStream` + `--list-funcs` 표. 길지만 각 클래스는 독립적 |
-| 13 | `cli.py` | 350 | 옵션 정의, 검증(`_search_config`), 실행(`run_search`) |
+| 10 | `funcs.py` | 200 | 함수 추출(Tokenizer + 수식 모양 캐시), 내장/lambda/custom 분류, 휘발성 목록, `--list-funcs` |
+| 11 | `search.py` | 260 | `Searcher._select`가 매칭의 핵심(패턴 AND --ref, -v). `search_file`은 parts를 돌며 찾고 렌더링 |
+| 12 | `output.py` | 470 | 포매터 4종 + `ResultStream`. 길지만 각 클래스는 독립적 |
+| 13 | `stats.py` | 300 | `--stats`. 수집(`stats_file`, `_count_cells`) → 합계(`combine`) → 출력. `refs.relative_form`으로 고유 수식 |
+| 14 | `cli.py` | 400 | 옵션 정의, 검증(`_search_config`, `_func_config`, `_stats_config`), 실행(`run_search` 등) |
 
 ### workbook.py 읽는 법
 
@@ -125,6 +127,7 @@ xl/comments1.xml                  → 셀 메모
 | `test_funcs.py` | `--list-funcs` 분류·집계·캐시 |
 | `test_refs.py` | `--ref` 스캔·해석·이름 추적, `SharedFormula` = openpyxl `Translator` |
 | `test_reader.py` | 정규식 경로 = 표준 파서 경로 = openpyxl. 테스트 xlsx를 XML로 직접 써서 만든다 |
+| `test_stats.py` | `--stats` 지표(셀·패키지), 합계, 표·JSON·CSV·카드 |
 | `test_parallel.py` | `-j1`과 `-j2` 출력이 모든 형식에서 같음 |
 
 `tests/conftest.py`의 `make_workbook`은 openpyxl로 파일을 만든 뒤 계산값을 XML에 패치한다(openpyxl은 계산값을 쓰지 않음).
@@ -139,3 +142,4 @@ xl/comments1.xml                  → 셀 메모
 4. `=SUM(2:$5)`의 `$5`에서 `$`는 행에 붙는다. 이걸 처리하는 함수는? 이게 틀리면 어떤 기능 두 개가 영향을 받나? (`refs._split_endpoint`)
 5. 정규식 스캐너가 포기하고 표준 파서로 넘기는 경우 다섯 가지는? (`workbook._sheet_data`)
 6. `--list-funcs`가 1만 개의 공유 수식을 왜 한 번만 토큰화하나? (`funcs._SHAPE_RE`)
+7. `--stats`에서 D2의 `=B2*C2`와 D3의 `=B3*C3`이 고유 수식 1개로 세어지는 과정은? 공유 수식 그룹이면 어떤 계산이 생략되나? (`refs.relative_form`, `stats._count_cells`)

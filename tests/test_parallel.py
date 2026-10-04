@@ -36,6 +36,8 @@ def run(sample_dir, capsys):
         ["-l", "VLOOKUP"],
         ["--list-funcs"],
         ["--list-funcs", "--by", "file"],
+        ["--stats"],
+        ["--stats", "--by", "sheet", "--json"],
     ],
 )
 def test_parallel_matches_sequential(run, args):

@@ -155,6 +155,40 @@ reports/sales.xlsx:Summary!E4:=SUM(SalesRange)       ← 이름 정의를 거친
 문자열 리터럴과 대괄호 내용(표 열 이름, 외부 통합문서 이름)을 가린 수식에 정규식을 적용한다. 정규식 일치 위치가 곧
 강조 구간이 된다.
 
+## 규모·이전 위험 지표 (`--stats`)
+
+웹 이전 같은 작업 전에 파일과 시트의 규모, 옮기기 어려운 요소를 가늠한다.
+
+```
+$ xlgrep --stats reports/
+FILE           SIZE  SHEETS   CELLS  FORMULAS  UNIQUE  VOLATILE  ARRAY  ERRORS  VBA  EXT
+sales.xlsx   2.3 MB     4/1  182,340    41,200     312        18      3       7  yes    2
+budget.xlsx   95 KB       2    9,120     2,050      47         0      0       0   no    0
+TOTAL        2.4 MB       6  191,460    43,250     351        18      3       7    1    2
+```
+
+| 지표 | 정의 |
+|---|---|
+| CELLS / values / FORMULAS | 비어 있지 않은 셀 / 수식 없는 셀 / 수식 셀 |
+| UNIQUE | 고유 수식 수. 참조를 셀 위치 기준 상대형(R1C1)으로 바꿔 같은 논리면 하나로 센다 (사용자 결정). `=B2*C2`(D2)와 `=B3*C3`(D3)는 모두 `=RC[-2]*RC[-1]`. 같은 공유 수식 그룹은 계산 한 번. 파일·전체 합계는 합집합(다른 시트의 같은 논리는 하나) |
+| longest | 가장 긴 수식의 글자 수 |
+| VOLATILE | 휘발성 함수(NOW, TODAY, RAND, RANDBETWEEN, RANDARRAY, OFFSET, INDIRECT, CELL, INFO)를 부르는 수식 수, 함수별 수 |
+| ARRAY / data tables | 배열 수식(`<f t="array">`) / 데이터 표(`TABLE`) |
+| ERRORS | 오류값을 보이는 셀(`#REF!`, `#N/A`, …). 저장된 값 기준. 텍스트로 `#N/A`라고 쓴 셀도 센다(알려진 한계) |
+| custom / lambdas | 사용자 정의(VBA·추가 기능) 함수, LAMBDA 이름 (`--list-funcs`의 분류 재사용) |
+| cf / dv | 조건부 서식 **규칙** 수(between 규칙은 수식이 둘이어도 1), 유효성 검사 수. x14 확장 포함 |
+| names / notes | 이름 정의(시트 범위 + 통합문서 범위) / 메모 |
+| tables / pivots / charts | 시트의 rels로 연결된 표, 피벗 테이블, 차트(drawing → chart) |
+| VBA / EXT / connections | `vbaProject.bin` 유무 / `xl/externalLinks/` 수 / `connections.xml` 유무 |
+
+- 수식 지표(FORMULAS, UNIQUE, longest, VOLATILE, custom, ARRAY)는 **셀 수식** 기준이다. 조건부 서식·유효성 검사·이름의
+  수식은 각 대상의 개수로만 센다.
+- 출력: 기본은 파일당 한 줄 표(파일이 여럿이면 TOTAL 행). `--by sheet`는 파일별 시트 표(RANGE, CF, DV 포함).
+  `-p`는 파일마다 모든 지표를 카드로. `--json`/`--csv`는 모든 지표(파일 또는 시트당 한 레코드).
+- 범위 옵션(`--sheet`, `--no-hidden`, `--range`, `--objects`, `-g`, `-j`)이 적용된다. `--range`는 셀·대상에만 적용되고
+  표·피벗·차트·규칙 수는 시트 단위로 센다.
+- 셀 지표를 위해 값 셀도 모두 읽는다. 100만 셀(수식 20만, 비공유) 파일 4.8초, 60만 셀(공유 수식 20만) 2.3초.
+
 ## 옵션
 
 ### 패턴
@@ -272,7 +306,8 @@ src/xlgrep/
   files.py     경로 탐색, 글롭 필터
   workbook.py  워크북 읽기 → 시트별 셀 격자 (수식/값)
   objects.py   셀 밖 대상 (이름 정의, 조건부 서식, 유효성 검사, 메모) — XML 직접 파싱
-  funcs.py     --list-funcs: 함수 추출, 내장/lambda/custom 분류, 집계
+  funcs.py     함수 추출(CallScanner), 내장/lambda/custom 분류, VOLATILE, --list-funcs 집계와 표
+  stats.py     --stats: 지표 수집(stats_file), 합계(combine), 표·카드·JSON·CSV
   refs.py      --ref: 참조 추출(정규식), 대상 범위 판정, 이름 정의 추적
   scope.py     범위 규칙(시트·셀·대상), ScopedWorkbook: 파일을 한 번 열고 시트별로 범위 안의 것을 준다
   search.py    파일 하나 처리(Searcher, search_file, count_file), 병렬 실행(Runner)
@@ -301,6 +336,8 @@ src/xlgrep/
 | `--ref`는 이름 정의를 따라감 (사용자 결정) | 시트 삭제 영향 파악에는 간접 참조까지 봐야 완전함 |
 | 참조 추출은 Tokenizer 대신 정규식 | 스필 참조, `A1:INDEX()` 처리. 일치 위치를 강조에 그대로 사용 |
 | 셀은 정규식으로 직접 읽고, 예외적 형식은 표준 파서로 (사용자 결정) | openpyxl 대비 2–3배. 두 경로 교차 검증 |
+| `--stats`는 xlgrep 플래그 (사용자 결정) | 범위 옵션·병렬·출력 형식을 그대로 재사용 |
+| 고유 수식은 상대형(R1C1) 정규화로 센다 (사용자 결정) | Excel의 공유 그룹 여부와 무관하게 같은 논리를 하나로 |
 | 병렬은 파일 단위 프로세스, 출력은 파일 순서 고정 | 결과가 실행마다 같아야 함(grep 출력은 스크립트가 읽는다). 시트 단위 분할은 openpyxl이 파일을 통째로 열어야 해서 이득이 적음 |
 
 ## 로드맵
@@ -324,10 +361,7 @@ src/xlgrep/
    - 추가 후보: 큰 파일 하나를 행 구간으로 나눠 병렬 처리(공유 수식 마스터를 먼저 모아야 함), `--ref` 사전 필터.
 2. ~~**구조 리팩토링**~~ — 완료(2026-10-04). 범위 규칙을 `scope.py`로 일원화, 포매터 = 파일 하나 + `ResultStream`,
    `CellReader`, cli 단계 분리, 읽기 안내 [ARCHITECTURE.md](ARCHITECTURE.md). 동작 불변(v0.6.0과 22개 옵션 조합 출력 비교).
-3. **`--stats` (사용자 결정: xlgrep 플래그)** — 파일/시트별 규모 지표.
-   사용 범위, 값 셀 수, 수식 셀 수, **고유 수식 패턴 수**(재구현할 로직의 양), 휘발성 함수(NOW, TODAY, RAND,
-   OFFSET, INDIRECT, CELL, INFO 등), 배열·동적 배열 수식, 데이터 표, VBA 유무(`vbaProject.bin`), 사용자 정의 함수/LAMBDA,
-   조건부 서식·유효성 검사·이름 정의 수, 외부 연결 수.
+3. ~~**`--stats`**~~ — 완료. 위 "규모·이전 위험 지표" 절.
 4. **`--deps` (사용자 결정: xlgrep 플래그)** — 의존 관계.
    - 파일 간: 수식의 `[n]Sheet!A1`과 `xl/externalLinks/externalLinkN.xml`(+ rels의 대상 경로)을 이어
      "A.xlsx → B.xlsx (수식 N개)". 대상 파일이 검색 경로에 없으면 표시.

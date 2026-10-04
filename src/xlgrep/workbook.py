@@ -23,8 +23,8 @@ from openpyxl.utils.cell import coordinate_to_tuple
 from openpyxl.utils.datetime import CALENDAR_MAC_1904, WINDOWS_EPOCH, from_excel, from_ISO8601
 
 from .address import col_index
-from .refs import SharedFormula
 from .package import REL_SHARED_STRINGS, REL_STYLES, Package, SheetInfo, children, local, open_package
+from .refs import SharedFormula
 from .text import normalize_formula, value_text
 
 
@@ -35,6 +35,8 @@ class Cell:
     formula: str | None = None  # formula text including the leading "=", if any
     value: object = None  # literal value, or the cached result of a formula
     has_cached_value: bool = False
+    shared: str | None = None  # shared-formula group (si); cells of a group have the same logic
+    array: bool = False  # an array (CSE / dynamic array) formula
 
     @property
     def is_formula(self) -> bool:
@@ -55,6 +57,7 @@ class Sheet:
     name: str
     hidden: bool
     cells: dict[tuple[int, int], Cell] = field(default_factory=dict)
+    dimension: str | None = None  # the used range Excel recorded, e.g. "A1:J100"
 
     def get(self, row: int, col: int) -> Cell | None:
         return self.cells.get((row, col))
@@ -79,7 +82,10 @@ class CellReader:
         formulas and show no neighbouring cells."""
         sheet = Sheet(info.name, info.hidden)
         if info.part is not None:
-            sheet.cells = read_cells(self.zf.read(info.part), self.ctx, formulas_only=formulas_only)
+            data = self.zf.read(info.part)
+            dimension = _DIMENSION_RE.search(data, 0, 65536)
+            sheet.dimension = dimension.group(1).decode() if dimension else None
+            sheet.cells = read_cells(data, self.ctx, formulas_only=formulas_only)
         return sheet
 
 
@@ -232,8 +238,11 @@ def _make_cell(row: int, col: int, cell_type: str, style: int,
     elif raw_value is not None and raw_value != "":
         value = _convert(raw_value, cell_type, style, ctx)
     if formula is not None:
-        text = formulas.text(formula[0], formula[1], row, col)
-        return Cell(row, col, formula=text, value=value, has_cached_value=value is not None)
+        attrs, body = formula
+        text = formulas.text(attrs, body, row, col)
+        kind = attrs.get("t")
+        return Cell(row, col, formula=text, value=value, has_cached_value=value is not None,
+                    shared=attrs.get("si") if kind == "shared" else None, array=kind == "array")
     if value is None:
         return None
     return Cell(row, col, value=value, has_cached_value=True)
@@ -247,6 +256,7 @@ class _Irregular(Exception):
 
 
 _ROOT_PREFIX_RE = re.compile(rb"<\w+:worksheet\b")
+_DIMENSION_RE = re.compile(rb'<(?:\w+:)?dimension\s+ref="([^"]+)"')
 # One C-level pass pulls out coordinate, type, style and body; the lookaheads make
 # attribute order irrelevant.
 _CELL_RE = re.compile(
@@ -338,8 +348,9 @@ def _fast_cell(row: int, col: int, raw_type: bytes, style: int, body: bytes,
             return None
         raw = dep.group(2)
         value = _convert(_xml_text(raw), raw_type.decode() or "n", style, ctx) if raw else None
-        formula = formulas.dependent(dep.group(1).decode(), row, col)
-        return Cell(row, col, formula=formula, value=value, has_cached_value=value is not None)
+        si = dep.group(1).decode()
+        return Cell(row, col, formula=formulas.dependent(si, row, col), value=value,
+                    has_cached_value=value is not None, shared=si)
     return None
 
 

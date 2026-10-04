@@ -24,8 +24,9 @@ uv build                # dist/ 에 sdist + wheel
 - `workbook.py` — 시트 XML을 직접 읽어 `Cell` 격자 생성(수식+계산값 한 번에). 정규식 경로가 기본, 예외적 형식은 `ElementTree` 경로
 - `package.py` — xlsx 패키지 구조: workbook.xml, rels, 시트 목록 (objects.py와 workbook.py가 공유)
 - `objects.py` — 셀 밖 대상(이름 정의, 조건부 서식, 유효성 검사, 메모). openpyxl 대신 xlsx XML을 직접 파싱
-- `funcs.py` — `--list-funcs`: Tokenizer로 함수 추출, 내장/lambda/custom 분류, 집계 (출력은 `output.write_func_stats`)
-- `refs.py` — `SharedFormula`(공유 수식 템플릿, 셀 위치로 상대 참조 이동), `--ref`: 정규식으로 참조 추출(문자열·대괄호 마스킹), 대상 범위 겹침 판정, 이름 정의 연쇄 추적
+- `funcs.py` — Tokenizer로 함수 추출(`CallScanner`, 수식 모양별 캐시), 내장/lambda/custom 분류, `VOLATILE`, `--list-funcs` 집계와 출력
+- `stats.py` — `--stats`: 파일별 지표 수집(`stats_file`), 합계(`combine`), 표·카드·JSON·CSV 출력
+- `refs.py` — `SharedFormula`(공유 수식 템플릿, 셀 위치로 상대 참조 이동), `relative_form`(R1C1 정규화, 고유 수식 수), `--ref`: 정규식으로 참조 추출(문자열·대괄호 마스킹), 대상 범위 겹침 판정, 이름 정의 연쇄 추적
 - `search.py` — 파일 하나 처리(`Searcher`, `search_file`, `count_file`)와 병렬 실행(`Runner`, `choose_jobs`). 범위 판단은 하지 않는다(scope.py)
 - `matcher.py` — 일반 패턴 + `-f` 함수 패턴(문자열 리터럴 마스킹 후 매칭)
 - `text.py` — `_xlfn.` 등 접두사 정규화, 값 문자열화, 이스케이프, 동아시아 문자 표시 폭

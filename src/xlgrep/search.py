@@ -9,13 +9,11 @@ from __future__ import annotations
 import io
 import os
 import re
-import zipfile
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, TypeVar
-from xml.etree import ElementTree as ET
 
 from .address import CellRange
 from .funcs import FuncCounter, FuncStat
@@ -23,11 +21,8 @@ from .matcher import Matcher, merge_spans
 from .objects import SheetObject
 from .output import FORMATTERS, Match, ObjectMatch, OutputOptions
 from .refs import RefFinder, RefHit, Target
-from .scope import Scope, ScopedWorkbook
+from .scope import READ_ERRORS, Scope, ScopedWorkbook
 from .workbook import Cell
-
-# What a broken or unreadable workbook raises; reported per file, not fatal.
-READ_ERRORS = (zipfile.BadZipFile, KeyError, OSError, ValueError, ET.ParseError)
 
 # Below this much input, starting worker processes costs more than it saves.
 PARALLEL_MIN_BYTES = 1_000_000
