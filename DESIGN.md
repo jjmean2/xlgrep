@@ -189,6 +189,41 @@ TOTAL        2.4 MB       6  191,460    43,250     351        18      3       7 
   표·피벗·차트·규칙 수는 시트 단위로 센다.
 - 셀 지표를 위해 값 셀도 모두 읽는다. 100만 셀(수식 20만, 비공유) 파일 4.8초, 60만 셀(공유 수식 20만) 2.3초.
 
+## 의존 관계 (`--deps`)
+
+각 통합문서가 무엇에 의존하는지: 다른 통합문서, 같은 파일의 다른 시트, 외부 데이터 연결.
+
+```
+$ xlgrep --deps reports/
+reports/sales.xlsx
+  → C:\공유\rates.xlsx      2 formulas  (missing)
+  → reports/budget.xlsx     2 formulas
+  → sub/lookup.xlsx          1 formula  (matched by name)
+  sheets  Summary → Data 3 · Summary → Report 1 · Data → Summary 1
+  data    Query - Sales (Power Query)
+1 of 3 workbooks have dependencies
+```
+
+- **파일 간**: 수식의 `[n]Sheet!A1`은 `workbook.xml`의 `<externalReferences>` n번째 →
+  `xl/externalLinks/externalLinkN.xml`(대상의 시트 이름) → 그 rels의 외부 경로로 이어진다(`package.external_books`).
+  `[n]!Name`(다른 통합문서의 이름)도 의존으로 센다.
+- **경로 해석**(`deps.resolve_target`, 부모 프로세스에서): 상대 경로는 원본 파일 폴더 기준. 지금 컴퓨터에 없는 경로(다른
+  컴퓨터의 Windows 경로 등)는 검색한 파일 중 같은 이름이 정확히 하나면 연결(`matched by name`), 아니면 `missing`.
+- **시트 간**: 같은 파일 안 다른 시트 참조. 시트명 없는 참조는 자기 시트라 의존이 아니다. 3D 참조는 펼친다.
+- **세는 단위**: 수식 하나가 어떤 대상에 의존하면 1(같은 시트를 여러 번 참조해도 1). 셀·조건부 서식·유효성 검사·이름 정의의
+  수식 모두. 이름 정의를 거친 참조는 따라간다(`--ref`와 같은 결정). 이름 해석과 3D 확장은 `refs.RefContext`를 `--ref`와 공유.
+- **데이터 연결**: `connections.xml`의 연결 이름과 종류(ODBC, OLE DB, 웹 쿼리, Power Query …). **연결 문자열은 출력하지
+  않는다**(서버·비밀번호가 들어 있을 수 있음).
+- 출력: 기본은 파일 간 의존 줄 + 시트 간 요약 한 줄 + 데이터 연결 (사용자 결정). `--by sheet`는 파일 간 의존을
+  `Summary → budget.xlsx : Budget`처럼 시트 단위로, 시트 간 의존도 줄마다. 의존 없는 파일은 생략하고, 여러 파일이면
+  "N of M workbooks have dependencies". `--json`/`--csv`는 의존 하나당 한 레코드(`from, from_sheet, to, to_sheet, kind,
+  formulas, status, type`).
+- **`--graph mermaid` (사용자 결정)**: Mermaid flowchart. 기본은 통합문서 노드, `--by sheet`는 통합문서별 subgraph 안에
+  시트 노드. 찾지 못한 파일은 점선. GitHub·VS Code 미리보기 등에 붙이면 그림으로 보인다.
+- 성능: 수식만 읽고, 의존 대상은 (수식 모양, 시트)별로 캐시한다(행 번호는 의존 대상을 바꾸지 않음).
+  100만 셀 파일 2.2초, 60만 셀(공유 수식) 1.6초.
+- 판정하지 않는 것: `INDIRECT`로 만든 참조, 표 참조(`Table1[Col]`)의 대상 시트, OLE/DDE 링크.
+
 ## 옵션
 
 ### 패턴
@@ -308,6 +343,7 @@ src/xlgrep/
   objects.py   셀 밖 대상 (이름 정의, 조건부 서식, 유효성 검사, 메모) — XML 직접 파싱
   funcs.py     함수 추출(CallScanner), 내장/lambda/custom 분류, VOLATILE, --list-funcs 집계와 표
   stats.py     --stats: 지표 수집(stats_file), 합계(combine), 표·카드·JSON·CSV
+  deps.py      --deps: 의존 수집(deps_file), 경로 해석(resolve_target), 텍스트·JSON·CSV·Mermaid
   refs.py      --ref: 참조 추출(정규식), 대상 범위 판정, 이름 정의 추적
   scope.py     범위 규칙(시트·셀·대상), ScopedWorkbook: 파일을 한 번 열고 시트별로 범위 안의 것을 준다
   search.py    파일 하나 처리(Searcher, search_file, count_file), 병렬 실행(Runner)
@@ -338,6 +374,9 @@ src/xlgrep/
 | 셀은 정규식으로 직접 읽고, 예외적 형식은 표준 파서로 (사용자 결정) | openpyxl 대비 2–3배. 두 경로 교차 검증 |
 | `--stats`는 xlgrep 플래그 (사용자 결정) | 범위 옵션·병렬·출력 형식을 그대로 재사용 |
 | 고유 수식은 상대형(R1C1) 정규화로 센다 (사용자 결정) | Excel의 공유 그룹 여부와 무관하게 같은 논리를 하나로 |
+| `--deps` 기본 출력은 파일 간 + 시트 요약 한 줄 (사용자 결정) | 파일 간이 주 관심사, 시트 간은 `--by sheet`로 자세히 |
+| `--deps --graph mermaid` (사용자 결정) | 설치 없이 GitHub·VS Code 등에서 바로 그림으로 |
+| 데이터 연결 문자열은 출력하지 않음 | 서버 주소·비밀번호가 들어 있을 수 있음 |
 | 병렬은 파일 단위 프로세스, 출력은 파일 순서 고정 | 결과가 실행마다 같아야 함(grep 출력은 스크립트가 읽는다). 시트 단위 분할은 openpyxl이 파일을 통째로 열어야 해서 이득이 적음 |
 
 ## 로드맵
@@ -362,12 +401,9 @@ src/xlgrep/
 2. ~~**구조 리팩토링**~~ — 완료(2026-10-04). 범위 규칙을 `scope.py`로 일원화, 포매터 = 파일 하나 + `ResultStream`,
    `CellReader`, cli 단계 분리, 읽기 안내 [ARCHITECTURE.md](ARCHITECTURE.md). 동작 불변(v0.6.0과 22개 옵션 조합 출력 비교).
 3. ~~**`--stats`**~~ — 완료. 위 "규모·이전 위험 지표" 절.
-4. **`--deps` (사용자 결정: xlgrep 플래그)** — 의존 관계.
-   - 파일 간: 수식의 `[n]Sheet!A1`과 `xl/externalLinks/externalLinkN.xml`(+ rels의 대상 경로)을 이어
-     "A.xlsx → B.xlsx (수식 N개)". 대상 파일이 검색 경로에 없으면 표시.
-   - 시트 간: 어느 시트가 어느 시트를 몇 번 참조하는지.
-   - 외부 데이터 연결: `xl/connections.xml`, Power Query.
-   - `--json`으로 그래프 도구에 넘길 수 있게.
+4. ~~**`--deps`**~~ — 완료. 위 "의존 관계" 절.
+
+3단계 완료(2026-10-04).
 
 ### 기타 후보
 - 숨김 행/열 제외 옵션

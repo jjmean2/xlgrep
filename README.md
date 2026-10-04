@@ -49,6 +49,8 @@ Exit status is 0 if a cell matched, 1 if none did, 2 on errors.
 | VLOOKUPs that read from a range | `xlgrep -f VLOOKUP --ref 'Data!A:D' .` |
 | Which functions are used, and how often | `xlgrep --list-funcs .` |
 | Size and migration-relevant metrics per workbook | `xlgrep --stats .`, `--stats -p .`, `--stats --by sheet --csv .` |
+| Which workbooks / sheets / data sources each workbook depends on | `xlgrep --deps .`, `--deps --by sheet .` |
+| Dependency diagram (paste into GitHub / VS Code Markdown) | `xlgrep --deps --graph mermaid .` |
 | Function usage per file / sheet | `xlgrep --list-funcs --by file -f VLOOKUP,XLOOKUP .` |
 | Matching files / counts | `xlgrep -l ...`, `xlgrep -c ...` |
 | Parallelism (default: auto) | `-j 8`, `-j 1` for sequential |
@@ -79,6 +81,12 @@ formulas calling volatile functions, array formulas, cells showing errors, VBA a
 links. `-p` shows every metric (custom functions, LAMBDAs, conditional formats, validations,
 names, notes, tables, pivot tables, charts, data connections) as cards; `--json`/`--csv`
 include them all; `--by sheet` gives a row per sheet.
+
+`--deps` lists, per workbook, the other workbooks its formulas refer to (with how many
+formulas, resolving stored paths relative to the workbook, or by file name among the searched
+files when the path is from another computer), dependencies between its own sheets, and its
+data connections (name and type only — connection strings are never printed). References
+through defined names are followed. `--graph mermaid` draws it as a Mermaid flowchart.
 
 `--list-funcs` prints a table of functions with their call count, the number of formulas
 using them and the number of files. Custom functions are marked `lambda` (a LAMBDA defined

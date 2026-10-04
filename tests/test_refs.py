@@ -14,7 +14,7 @@ from xlgrep.address import CellRange, parse_range
 from xlgrep.cli import main
 from openpyxl.formula.translate import Translator
 
-from xlgrep.refs import RefFinder, SharedFormula, Target, parse_target, scan_refs
+from xlgrep.refs import RefContext, RefFinder, SharedFormula, Target, parse_target, scan_refs
 
 
 def refs_of(formula):
@@ -34,6 +34,13 @@ def test_scan_refs_forms():
         ("[1]Ext!A1", ("Ext",), True, None), ("'[Book.xlsx]Ext'!B2", ("Ext",), True, None),
     ]
     assert refs_of("=Data!A1#+LOG10(5)") == [("Data!A1#", ("Data",), False, None)]
+
+
+def test_scan_refs_external_books():
+    refs = scan_refs("=[1]Rates!A1+'[2]My Sheet'!$B$2+[3]!TaxRate+'[Book.xlsx]Ext'!C3")
+    assert [(r.book, r.sheets, r.name) for r in refs] == [
+        ("1", ("Rates",), None), ("2", ("My Sheet",), None), ("3", None, "TaxRate"), ("Book.xlsx", ("Ext",), None),
+    ]
 
 
 def test_scan_refs_ignores_strings_tables_and_function_names():
@@ -58,9 +65,11 @@ def test_parse_target():
 def test_ref_finder_names_3d_and_sweep():
     finder = RefFinder(
         [parse_target("Data!A:D")],
-        ["Summary", "Data", "Other"],
-        {(None, "SALESRANGE"): "=Data!B:B", (None, "CHAINED"): "=SalesRange*2", (None, "LOOP"): "=Loop+1",
-         ("Summary", "LOCAL"): "=Other!A1"},
+        RefContext(
+            ["Summary", "Data", "Other"],
+            {(None, "SALESRANGE"): "=Data!B:B", (None, "CHAINED"): "=SalesRange*2", (None, "LOOP"): "=Loop+1",
+             ("Summary", "LOCAL"): "=Other!A1"},
+        ),
     )
     assert [(h.text, h.via) for h in finder.find("=SUM(SalesRange)", "Summary")] == [("SalesRange", "SalesRange")]
     assert [h.via for h in finder.find("=Chained", "Summary")] == ["Chained"]
@@ -72,11 +81,11 @@ def test_ref_finder_names_3d_and_sweep():
     assert finder.find("=Data!E1", "Summary") == []
 
     # Row-only endpoint: the "$" in "$5" fixes the row, so it must not sweep.
-    rows = RefFinder([parse_target("Summary!A30")], ["Summary"], {})
+    rows = RefFinder([parse_target("Summary!A30")], RefContext(["Summary"], {}))
     assert rows.find("=SUM(2:$5)", "Summary", [parse_range("B2:B50")]) != []
     assert rows.find("=SUM($2:$5)", "Summary", [parse_range("B2:B50")]) == []
 
-    sweep = RefFinder([parse_target("Summary!A40")], ["Summary"], {})
+    sweep = RefFinder([parse_target("Summary!A40")], RefContext(["Summary"], {}))
     assert [h.text for h in sweep.find("=$A2>1", "Summary", [parse_range("B2:B50")])] == ["$A2"]
     assert sweep.find("=$A$2>1", "Summary", [parse_range("B2:B50")]) == []
 

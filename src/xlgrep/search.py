@@ -20,7 +20,7 @@ from .funcs import FuncCounter, FuncStat
 from .matcher import Matcher, merge_spans
 from .objects import SheetObject
 from .output import FORMATTERS, Match, ObjectMatch, OutputOptions
-from .refs import RefFinder, RefHit, Target
+from .refs import RefContext, RefFinder, RefHit, Target
 from .scope import READ_ERRORS, Scope, ScopedWorkbook
 from .workbook import Cell
 
@@ -76,7 +76,7 @@ class Searcher:
 
     def start_workbook(self, book: ScopedWorkbook) -> None:
         if self.targets:
-            self.ref_finder = RefFinder(self.targets, book.sheet_names, book.defined_names)
+            self.ref_finder = RefFinder(self.targets, RefContext(book.sheet_names, book.defined_names))
 
     def search_cells(self, cells: list[Cell], sheet: str, limit: int | None) -> list[Match]:
         matches: list[Match] = []

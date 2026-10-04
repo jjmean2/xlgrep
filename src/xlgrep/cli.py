@@ -11,6 +11,8 @@ from pathlib import Path
 
 from . import __version__
 from .address import parse_range
+from .deps import DepsConfig, FileDeps, deps_file, write_deps
+from .deps import edges as deps_edges
 from .files import UnsupportedFile, iter_files
 from .funcs import FuncCounter, write_func_stats
 from .matcher import build_matcher
@@ -50,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
             "xlgrep [OPTIONS] PATTERN [PATH ...]\n"
             "       xlgrep [OPTIONS] (-e PATTERN | -f FUNCS)... [PATH ...]\n"
             "       xlgrep --list-funcs [--by file|sheet] [-e PATTERN | -f FUNCS]... [PATH ...]\n"
-            "       xlgrep --stats [--by sheet] [PATH ...]"
+            "       xlgrep --stats [--by sheet] [PATH ...]\n"
+            "       xlgrep --deps [--by sheet] [--graph mermaid] [PATH ...]"
         ),
         description="Search the cells of Excel workbooks (.xlsx/.xlsm/.xltx/.xltm) like grep.",
         epilog=(
@@ -62,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  xlgrep --list-funcs .              which functions are used, and how often\n"
             "  xlgrep --ref 'Data!A:D' .          formulas that reference columns A-D of sheet Data\n"
             "  xlgrep --stats -p .                size and migration-relevant metrics per workbook\n"
+            "  xlgrep --deps --graph mermaid .    which workbooks depend on which, as a diagram\n"
             "\n"
             "exit status is 0 if a cell matched, 1 if none did, 2 if an error occurred."
         ),
@@ -126,8 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("--stats", action="store_true",
                          help="size, formulas, unique formulas, volatile functions, errors, VBA, links … "
                               "per workbook (-p: all metrics as cards; --json/--csv: everything)")
+    summary.add_argument("--deps", action="store_true",
+                         help="dependencies: other workbooks (formulas per file), sheets of the same "
+                              "workbook, data connections; follows defined names")
+    g.add_argument("--graph", choices=["mermaid"], help="--deps: print a Mermaid flowchart")
     g.add_argument("--by", choices=["file", "sheet"],
-                   help="--list-funcs: break counts down per file or sheet; --stats: a row per sheet")
+                   help="--list-funcs: break counts down per file or sheet; --stats: a row per sheet; "
+                        "--deps: dependencies per sheet")
     g.add_argument("--sort", choices=["calls", "name"], default="calls",
                    help="--list-funcs: order by call count (default) or name")
 
@@ -172,7 +181,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.list_funcs:
         return run_list_funcs(_func_config(parser, args, funcs), args)
     if args.stats:
-        return run_stats(_stats_config(parser, args, funcs), args)
+        return run_stats(_stats_config(parser, args, funcs, "--stats"), args)
+    if args.deps:
+        return run_deps(_deps_config(parser, args, funcs), args)
+    if args.graph:
+        parser.error("--graph only applies to --deps")
     cfg, paths = _search_config(parser, args, funcs)
     return run_search(cfg, paths, args)
 
@@ -327,14 +340,23 @@ def run_search(cfg: SearchConfig, paths: list[str], args: argparse.Namespace) ->
     return EXIT_MATCH if any_match else EXIT_NO_MATCH
 
 
-def _stats_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> StatsConfig:
+def _stats_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str],
+                  mode: str) -> StatsConfig:
     """Validate the --stats options. All positional arguments are paths."""
-    _check_summary(parser, args, "--stats")
+    _check_summary(parser, args, mode)
     if args.regexp or funcs:
-        parser.error("-e/-f filter --list-funcs; --stats takes no patterns")
+        parser.error(f"-e/-f filter --list-funcs; {mode} takes no patterns")
     if args.sort != "calls":
         parser.error("--sort only applies to --list-funcs")
+    if args.graph and mode != "--deps":
+        parser.error("--graph only applies to --deps")
     return StatsConfig(scope=_scope(parser, args), by=args.by)
+
+
+def _deps_config(parser: argparse.ArgumentParser, args: argparse.Namespace, funcs: list[str]) -> DepsConfig:
+    """Validate the --deps options (same rules as --stats). All positional arguments are paths."""
+    stats = _stats_config(parser, args, funcs, "--deps")
+    return DepsConfig(scope=stats.scope, by=stats.by)
 
 
 def run_stats(cfg: StatsConfig, args: argparse.Namespace) -> int:
@@ -366,6 +388,41 @@ def run_stats(cfg: StatsConfig, args: argparse.Namespace) -> int:
     if had_error:
         return EXIT_ERROR
     return EXIT_MATCH if collected else EXIT_NO_MATCH
+
+
+def run_deps(cfg: DepsConfig, args: argparse.Namespace) -> int:
+    collected: list[FileDeps] = []
+    searched: list[Path] = []
+    had_error = False
+    files = _each_file(args.args, args.glob, deps_file, cfg, args.threads)
+    try:
+        for path, result in files:
+            if result is None:
+                had_error = True
+                continue
+            searched.append(path)
+            for error in result.errors:
+                _report(error)
+                had_error = True
+            if not result.errors:
+                collected.append(result)
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        files.close()
+
+    # Resolving needs every searched file (external links are matched by name).
+    all_edges = [deps_edges(d, cfg.by, searched) for d in collected]
+    mode = "json" if args.json else "csv" if args.csv else "mermaid" if args.graph else "text"
+    try:
+        if collected:
+            write_deps(all_edges, cfg.by, mode, Style(_use_color(args.color)))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _quiet_pipe()
+    if had_error:
+        return EXIT_ERROR
+    return EXIT_MATCH if any(all_edges) else EXIT_NO_MATCH
 
 
 def run_list_funcs(cfg: FuncConfig, args: argparse.Namespace) -> int:

@@ -16,7 +16,8 @@ from .text import mask_string_literals
 
 _SHEET_QUOTED = r"'(?:[^']|'')+'"
 _SHEET_PLAIN = r"[^\W\d][\w.]*"
-_PREFIX = rf"(?P<prefix>(?:{_SHEET_QUOTED}|(?:\[[^\]]+\])?{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?)!)?"
+# 'Sheet name'!, Sheet!, Sheet1:Sheet3!, [1]Sheet!, or [1]! (a name in another workbook)
+_PREFIX = rf"(?P<prefix>(?:{_SHEET_QUOTED}|\[[^\]]+\](?:{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?)?|{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?)!)?"
 _COL = r"\$?[A-Za-z]{1,3}"
 _ROW = r"\$?\d+"
 _AREA = rf"(?P<area>{_COL}{_ROW}(?::{_COL}{_ROW})?|{_COL}:{_COL}|{_ROW}:{_ROW})"
@@ -44,10 +45,14 @@ class Ref:
     start: int
     end: int
     sheets: tuple[str, ...] | None  # None: unqualified; two names for a 3D range
-    external: bool
+    book: str | None  # external workbook, as written between brackets ("1" in [1]Sheet!A1)
     first: Endpoint | None = None  # set for cell/range references
     last: Endpoint | None = None
     name: str | None = None  # set for defined-name references
+
+    @property
+    def external(self) -> bool:
+        return self.book is not None
 
 
 @dataclass(frozen=True)
@@ -73,14 +78,16 @@ def _unquote(sheet: str) -> str:
     return sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
 
 
-def _parse_prefix(prefix: str | None) -> tuple[tuple[str, ...] | None, bool]:
+def _parse_prefix(prefix: str | None) -> tuple[tuple[str, ...] | None, str | None]:
+    """(sheets, external book) of "Sheet!", "S1:S3!", "[1]Sheet!", "'[Book.xlsx]Sheet'!", "[1]!"."""
     if not prefix:
-        return None, False
+        return None, None
     body = _unquote(prefix[:-1])
-    external = body.startswith("[")
-    if external:
-        body = body[body.index("]") + 1 :]
-    return tuple(body.split(":", 1)), external
+    book = None
+    if body.startswith("["):
+        close = body.index("]")
+        book, body = body[1:close], body[close + 1 :]
+    return (tuple(body.split(":", 1)) if body else None), book
 
 
 def _split_endpoint(text: str) -> tuple[str, str | None, str, str | None] | None:
@@ -159,37 +166,40 @@ def scan_refs(formula: str) -> list[Ref]:
     refs: list[Ref] = []
     taken: list[tuple[int, int]] = []
     for m in _REF_RE.finditer(masked):
-        sheets, external = _parse_prefix(m.group("prefix"))
+        # The prefix is read from the original text: masking blanked the workbook number.
+        sheets, book = _parse_prefix(formula[m.start("prefix") : m.end("prefix")] if m.group("prefix") else None)
         try:
             first, last = _area(m.group("area"))
         except ValueError:
             continue
-        refs.append(Ref(m.start(), m.end(), sheets, external, first, last))
+        refs.append(Ref(m.start(), m.end(), sheets, book, first, last))
         taken.append(m.span())
     for m in _NAME_RE.finditer(masked):
         if any(s < m.end() and m.start() < e for s, e in taken):
             continue
-        sheets, external = _parse_prefix(m.group("prefix"))
         if m.group("name").upper() in ("TRUE", "FALSE"):
             continue
-        refs.append(Ref(m.start(), m.end(), sheets, external, name=m.group("name")))
+        sheets, book = _parse_prefix(formula[m.start("prefix") : m.end("prefix")] if m.group("prefix") else None)
+        refs.append(Ref(m.start(), m.end(), sheets, book, name=m.group("name")))
     refs.sort(key=lambda r: r.start)
     return refs
 
 
-class RefFinder:
-    """Matches references against targets within one workbook."""
+class RefContext:
+    """What references in one workbook resolve against: its sheet order and names.
 
-    def __init__(self, targets: list[Target], sheet_order: list[str],
-                 names: dict[tuple[str | None, str], str]):
-        """``names`` maps (scope sheet or None, NAME upper) to the name's formula."""
-        self.targets = targets
+    Shared by --ref (RefFinder) and --deps, so both resolve unqualified references,
+    3D ranges and defined names the same way.
+    """
+
+    def __init__(self, sheet_order: list[str], names: dict[tuple[str | None, str], str]):
+        """``names`` maps (scope sheet or None, NAME upper-cased) to the name's formula."""
         self.sheet_order = sheet_order
         self._lower_order = [s.lower() for s in sheet_order]
         self.names = {(s.lower() if s else None, n): f for (s, n), f in names.items()}
-        self._name_memo: dict[tuple[str | None, str], bool] = {}
 
-    def _sheets(self, ref: Ref, context: str | None) -> list[str]:
+    def sheets(self, ref: Ref, context: str | None) -> list[str]:
+        """The sheets a (non-external) reference covers; 3D ranges expand in workbook order."""
         if ref.sheets is None:
             return [context] if context is not None else []
         if len(ref.sheets) == 1:
@@ -200,7 +210,8 @@ class RefFinder:
         lo, hi = min(lo, hi), max(lo, hi)
         return self.sheet_order[lo : hi + 1]
 
-    def _resolve_name(self, ref: Ref, context: str | None) -> tuple[str | None, str] | None:
+    def name_key(self, ref: Ref, context: str | None) -> tuple[str | None, str] | None:
+        """The defined name a reference means: the formula sheet's own name first, then the workbook's."""
         key = ref.name.upper()
         if ref.sheets is not None:
             scoped = (ref.sheets[0].lower(), key)
@@ -209,14 +220,27 @@ class RefFinder:
             return context.lower(), key
         return (None, key) if (None, key) in self.names else None
 
+    def name_context(self, name_key: tuple[str | None, str]) -> str | None:
+        """The sheet a name's unqualified references point at (its scope sheet, if any)."""
+        scope = name_key[0]
+        return next((s for s in self.sheet_order if s.lower() == scope), None) if scope else None
+
+
+class RefFinder:
+    """Matches references against targets within one workbook."""
+
+    def __init__(self, targets: list[Target], context: RefContext):
+        self.targets = targets
+        self.context = context
+        self._name_memo: dict[tuple[str | None, str], bool] = {}
+
     def _name_hits(self, name_key: tuple[str | None, str], stack: frozenset = frozenset()) -> bool:
         if name_key in self._name_memo:
             return self._name_memo[name_key]
         if name_key in stack:
             return False
-        scope = name_key[0]
-        context = next((s for s in self.sheet_order if s.lower() == scope), None) if scope else None
-        hit = bool(self._hits(self.names[name_key], context, stack=stack | {name_key}))
+        formula = self.context.names[name_key]
+        hit = bool(self._hits(formula, self.context.name_context(name_key), stack=stack | {name_key}))
         self._name_memo[name_key] = hit
         return hit
 
@@ -227,12 +251,12 @@ class RefFinder:
             if ref.external:
                 continue
             if ref.name is not None:
-                key = self._resolve_name(ref, context)
+                key = self.context.name_key(ref, context)
                 if key is not None and self._name_hits(key, stack):
                     hits.append(RefHit(ref.start, ref.end, formula[ref.start : ref.end], via=ref.name))
                 continue
             area = _bounds(ref.first, ref.last, *sweep)
-            if any(t.hits(sheet, area) for sheet in self._sheets(ref, context) for t in self.targets):
+            if any(t.hits(sheet, area) for sheet in self.context.sheets(ref, context) for t in self.targets):
                 hits.append(RefHit(ref.start, ref.end, formula[ref.start : ref.end]))
         return hits
 

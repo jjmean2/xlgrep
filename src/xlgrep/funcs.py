@@ -30,10 +30,19 @@ BUILTIN, LAMBDA, CUSTOM = "builtin", "lambda", "custom"
 # Recalculated on every change anywhere in the workbook, not just when their inputs change.
 VOLATILE = frozenset({"NOW", "TODAY", "RAND", "RANDBETWEEN", "RANDARRAY", "OFFSET", "INDIRECT", "CELL", "INFO"})
 
-# Row numbers of cell references (A1 -> A, $B$2 -> $B$). Formulas filled down a
-# column then share one "shape" and one tokenisation. Digits before "(" or inside
+# Row numbers of cell references (A1 -> A, $B$2 -> $B$). Digits before "(" or inside
 # names (LOG10(, DEC2BIN() are kept, so function names never collide.
 _SHAPE_RE = re.compile(r"(?<=[A-Za-z$])\d+(?![\w(])")
+
+
+def formula_shape(formula: str) -> str:
+    """The formula without the row numbers of its references.
+
+    Formulas filled down a column share one shape, and so do the functions they call
+    and the sheets and workbooks they refer to; caching by shape avoids redoing that
+    work for every row.
+    """
+    return _SHAPE_RE.sub("", formula)
 
 
 def function_calls(formula: str) -> list[str]:
@@ -73,7 +82,7 @@ class CallScanner:
         self._calls: dict[str, list[str]] = {}
 
     def __call__(self, formula: str) -> list[str]:
-        shape = _SHAPE_RE.sub("", formula)
+        shape = formula_shape(formula)
         calls = self._calls.get(shape)
         if calls is None:
             calls = self._calls[shape] = function_calls(formula)
