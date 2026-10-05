@@ -16,8 +16,10 @@ from .text import mask_string_literals
 
 _SHEET_QUOTED = r"'(?:[^']|'')+'"
 _SHEET_PLAIN = r"[^\W\d][\w.]*"
+_SHEETS = rf"{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?"  # Sheet, or Sheet1:Sheet3 (3D)
+_BOOK = r"\[[^\]]+\]"  # [1] or [Book.xlsx]: another workbook
 # 'Sheet name'!, Sheet!, Sheet1:Sheet3!, [1]Sheet!, or [1]! (a name in another workbook)
-_PREFIX = rf"(?P<prefix>(?:{_SHEET_QUOTED}|\[[^\]]+\](?:{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?)?|{_SHEET_PLAIN}(?::{_SHEET_PLAIN})?)!)?"
+_PREFIX = rf"(?P<prefix>(?:{_SHEET_QUOTED}|{_BOOK}(?:{_SHEETS})?|{_SHEETS})!)?"
 _COL = r"\$?[A-Za-z]{1,3}"
 _ROW = r"\$?\d+"
 _AREA = rf"(?P<area>{_COL}{_ROW}(?::{_COL}{_ROW})?|{_COL}:{_COL}|{_ROW}:{_ROW})"
@@ -244,8 +246,9 @@ class RefFinder:
         self._name_memo[name_key] = hit
         return hit
 
-    def _hits(self, formula: str, context: str | None, sweep: tuple[int, int] = (0, 0),
-              stack: frozenset = frozenset()) -> list[RefHit]:
+    def _hits(
+        self, formula: str, context: str | None, sweep: tuple[int, int] = (0, 0), stack: frozenset = frozenset()
+    ) -> list[RefHit]:
         hits = []
         for ref in scan_refs(formula):
             if ref.external:

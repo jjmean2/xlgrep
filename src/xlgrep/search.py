@@ -113,8 +113,9 @@ class Searcher:
             return (cell.value_str, "value") if cell.has_cached_value else None
         return (cell.formula, "formula") if cell.is_formula else (cell.value_str, "value")
 
-    def _select(self, text: str, kind: str, sheet: str | None,
-                applies_to: list[CellRange] | None = None) -> tuple[list, list[RefHit] | None] | None:
+    def _select(
+        self, text: str, kind: str, sheet: str | None, applies_to: list[CellRange] | None = None
+    ) -> tuple[list, list[RefHit] | None] | None:
         """(spans to highlight, --ref hits) if the text is selected, else None. Honours -v.
 
         Patterns and --ref combine as AND: the text must match the patterns (if any)
@@ -146,8 +147,7 @@ def search_file(path: Path, cfg: SearchConfig) -> FileResult:
     # Cells that can't match are only read if they're shown around a match.
     formulas_only = cfg.formulas_only and not cfg.shows_neighbours
     try:
-        with ScopedWorkbook(path, cfg.scope, raw_formula=cfg.scope.raw_formula,
-                            formulas_only=formulas_only) as book:
+        with ScopedWorkbook(path, cfg.scope, raw_formula=cfg.scope.raw_formula, formulas_only=formulas_only) as book:
             searcher.start_workbook(book)
             for part in book.parts():
                 if _left(cfg.limit, result.count) == 0:

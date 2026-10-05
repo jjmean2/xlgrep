@@ -23,25 +23,30 @@ from xlgrep.stats import StatsConfig, combine, stats_file
 ALL = {"cell", "name", "cf", "dv", "note"}
 
 CELL_ROWS = [
-    '<row r="1">'
-    '<c r="A1"><f t="shared" ref="A1:A3" si="0">B1*2</f><v>2</v></c>'
-    '<c r="D1"><f>C1*2</f><v>0</v></c>'
-    '<c r="F1"><f>INDIRECT("A1")+NOW()</f><v>1</v></c>'
-    '<c r="G1"><f t="array" ref="G1:G2">SUM(B1:B2*2)</f><v>4</v></c>'
-    '<c r="H1"><f t="dataTable" ref="H1:H2" dt2D="0" dtr="0" r1="B1"/><v>5</v></c>'
-    '<c r="J1" t="e"><v>#REF!</v></c>'
-    "</row>",
-    '<row r="2"><c r="A2"><f t="shared" si="0"/><v>4</v></c><c r="B2"><v>2</v></c>'
-    '<c r="F2"><f>_xlfn.RANDARRAY(3)</f><v>0.5</v></c>'
-    '<c r="J2" t="e"><f>1/0</f><v>#DIV/0!</v></c></row>',
+    (
+        '<row r="1">'
+        '<c r="A1"><f t="shared" ref="A1:A3" si="0">B1*2</f><v>2</v></c>'
+        '<c r="D1"><f>C1*2</f><v>0</v></c>'
+        '<c r="F1"><f>INDIRECT("A1")+NOW()</f><v>1</v></c>'
+        '<c r="G1"><f t="array" ref="G1:G2">SUM(B1:B2*2)</f><v>4</v></c>'
+        '<c r="H1"><f t="dataTable" ref="H1:H2" dt2D="0" dtr="0" r1="B1"/><v>5</v></c>'
+        '<c r="J1" t="e"><v>#REF!</v></c>'
+        "</row>"
+    ),
+    (
+        '<row r="2"><c r="A2"><f t="shared" si="0"/><v>4</v></c><c r="B2"><v>2</v></c>'
+        '<c r="F2"><f>_xlfn.RANDARRAY(3)</f><v>0.5</v></c>'
+        '<c r="J2" t="e"><f>1/0</f><v>#DIV/0!</v></c></row>'
+    ),
     '<row r="3"><c r="A3"><f t="shared" si="0"/><v>6</v></c><c r="B3" t="s"><v>0</v></c></row>',
     '<row r="5"><c r="E5"><f>D5*2</f><v>0</v></c></row>',
 ]
 
 
 def test_cell_metrics(tmp_path):
-    path = write_xlsx(tmp_path / "cells.xlsx", sheet_xml(CELL_ROWS).replace(
-        "<sheetData>", '<dimension ref="A1:J5"/><sheetData>'))
+    path = write_xlsx(
+        tmp_path / "cells.xlsx", sheet_xml(CELL_ROWS).replace("<sheetData>", '<dimension ref="A1:J5"/><sheetData>')
+    )
     s = stats_file(path, StatsConfig(Scope(ALL), None)).sheets[0]
     assert s.dimension == "A1:J5"
     assert (s.values, s.formulas) == (3, 10)
@@ -82,8 +87,10 @@ def book(tmp_path) -> Path:
     hidden["A1"] = "#N/A"  # a text cell that reads like an error: counted as one (documented heuristic)
     wb.save(path)
 
-    pivot_rel = ('<Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
-                 'relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/>')
+    pivot_rel = (
+        '<Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/>'
+    )
     tmp = path.with_suffix(".tmp")
     with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w") as dst:
         for item in src.infolist():
@@ -141,8 +148,19 @@ def test_table(run):
     code, out, _ = run()
     assert code == 0
     lines = out.splitlines()
-    assert lines[0].split() == ["FILE", "SIZE", "SHEETS", "CELLS", "FORMULAS", "UNIQUE", "VOLATILE", "ARRAY",
-                                "ERRORS", "VBA", "EXT"]
+    assert lines[0].split() == [
+        "FILE",
+        "SIZE",
+        "SHEETS",
+        "CELLS",
+        "FORMULAS",
+        "UNIQUE",
+        "VOLATILE",
+        "ARRAY",
+        "ERRORS",
+        "VBA",
+        "EXT",
+    ]
     # Sizes depend on the zip encoder; compare everything else ("8.9 KB" is two tokens).
     rows = [line.split() for line in lines[1:]]
     assert [r[:1] + r[3:] for r in rows] == [
@@ -165,7 +183,12 @@ def test_json_csv_cards(run):
     _, out, _ = run("--json", "book.xlsx")
     rec = json.loads(out)
     assert (rec["sheets"], rec["vba"], rec["charts"], rec["custom_functions"], rec["lambdas"]) == (
-        2, True, 1, ["GetRate"], ["MyLambda"])
+        2,
+        True,
+        1,
+        ["GetRate"],
+        ["MyLambda"],
+    )
     _, out, _ = run("--csv", "--by", "sheet", "cells.xlsx")
     header, row = out.splitlines()
     assert header.startswith("file,sheet,hidden,range,cells,values,formulas,unique_formulas")

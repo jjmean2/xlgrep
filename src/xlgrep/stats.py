@@ -27,10 +27,25 @@ from .refs import relative_form
 from .scope import READ_ERRORS, Scope, ScopedWorkbook
 from .text import display_width
 
-ERROR_VALUES = frozenset({
-    "#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA",
-    "#SPILL!", "#CALC!", "#FIELD!", "#BLOCKED!", "#CONNECT!", "#BUSY!", "#UNKNOWN!",
-})
+ERROR_VALUES = frozenset(
+    {
+        "#NULL!",
+        "#DIV/0!",
+        "#VALUE!",
+        "#REF!",
+        "#NAME?",
+        "#NUM!",
+        "#N/A",
+        "#GETTING_DATA",
+        "#SPILL!",
+        "#CALC!",
+        "#FIELD!",
+        "#BLOCKED!",
+        "#CONNECT!",
+        "#BUSY!",
+        "#UNKNOWN!",
+    }
+)
 _EXTERNAL_LINK_RE = re.compile(r"(^|/)externalLinks/externalLink\d+\.xml$")
 
 
@@ -234,9 +249,19 @@ def _table(rows: list[list[str]], style: Style, out: TextIO, indent: str = "", b
 
 def _file_row(f: FileStats, t: Stats) -> list[str]:
     sheets = f"{len(f.sheets)}/{f.hidden_sheets}" if f.hidden_sheets else str(len(f.sheets))
-    return [f.path, _size(f.size), sheets, _num(t.cells), _num(t.formulas), _num(len(t.unique)),
-            _num(t.volatile_formulas), _num(t.arrays), _num(sum(t.errors.values())),
-            "yes" if f.vba else "no", str(f.external_links)]
+    return [
+        f.path,
+        _size(f.size),
+        sheets,
+        _num(t.cells),
+        _num(t.formulas),
+        _num(len(t.unique)),
+        _num(t.volatile_formulas),
+        _num(t.arrays),
+        _num(sum(t.errors.values())),
+        "yes" if f.vba else "no",
+        str(f.external_links),
+    ]
 
 
 def _write_file_table(files: list[FileStats], style: Style, out: TextIO) -> None:
@@ -244,10 +269,21 @@ def _write_file_table(files: list[FileStats], style: Style, out: TextIO) -> None
     rows += [_file_row(f, f.total) for f in files]
     if len(files) > 1:
         t = combine("TOTAL", [f.total for f in files])
-        rows.append(["TOTAL", _size(sum(f.size for f in files)), str(sum(len(f.sheets) for f in files)),
-                     _num(t.cells), _num(t.formulas), _num(len(t.unique)), _num(t.volatile_formulas),
-                     _num(t.arrays), _num(sum(t.errors.values())), str(sum(f.vba for f in files)),
-                     str(sum(f.external_links for f in files))])
+        rows.append(
+            [
+                "TOTAL",
+                _size(sum(f.size for f in files)),
+                str(sum(len(f.sheets) for f in files)),
+                _num(t.cells),
+                _num(t.formulas),
+                _num(len(t.unique)),
+                _num(t.volatile_formulas),
+                _num(t.arrays),
+                _num(sum(t.errors.values())),
+                str(sum(f.vba for f in files)),
+                str(sum(f.external_links for f in files)),
+            ]
+        )
     _table(rows, style, out, bold_last=len(files) > 1)
 
 
@@ -258,9 +294,20 @@ def _write_sheet_tables(files: list[FileStats], style: Style, out: TextIO) -> No
         out.write(style.heading(f.path) + "\n")
         rows = [["SHEET", "RANGE", "CELLS", "FORMULAS", "UNIQUE", "VOLATILE", "ARRAY", "ERRORS", "CF", "DV"]]
         for s in f.sheets:
-            rows.append([s.name + (" (hidden)" if s.hidden else ""), s.dimension or "", _num(s.cells),
-                         _num(s.formulas), _num(len(s.unique)), _num(s.volatile_formulas), _num(s.arrays),
-                         _num(sum(s.errors.values())), _num(s.cf), _num(s.dv)])
+            rows.append(
+                [
+                    s.name + (" (hidden)" if s.hidden else ""),
+                    s.dimension or "",
+                    _num(s.cells),
+                    _num(s.formulas),
+                    _num(len(s.unique)),
+                    _num(s.volatile_formulas),
+                    _num(s.arrays),
+                    _num(sum(s.errors.values())),
+                    _num(s.cf),
+                    _num(s.dv),
+                ]
+            )
         _table(rows, style, out, indent="  ")
 
 
@@ -275,37 +322,65 @@ def _write_cards(files: list[FileStats], style: Style, out: TextIO) -> None:
         t = f.total
         sheet_names = ", ".join(s.name + (" (hidden)" if s.hidden else "") for s in f.sheets)
         lines = [
-            ("sheets", f"{len(f.sheets)}" + (f" ({f.hidden_sheets} hidden)" if f.hidden_sheets else "")
-             + (f": {sheet_names}" if sheet_names else "")),
-            ("cells", f"{_num(t.cells)} (formulas {_num(t.formulas)}, unique {_num(len(t.unique))}, "
-                      f"longest {_num(t.longest)} chars)"),
+            (
+                "sheets",
+                f"{len(f.sheets)}"
+                + (f" ({f.hidden_sheets} hidden)" if f.hidden_sheets else "")
+                + (f": {sheet_names}" if sheet_names else ""),
+            ),
+            (
+                "cells",
+                (
+                    f"{_num(t.cells)} (formulas {_num(t.formulas)}, unique {_num(len(t.unique))}, "
+                    f"longest {_num(t.longest)} chars)"
+                ),
+            ),
             ("volatile", f"{_num(t.volatile_formulas)} formulas" + (f": {_counts(t.volatile)}" if t.volatile else "")),
             ("arrays", f"{_num(t.arrays)} array formulas, {_num(t.data_tables)} data tables"),
             ("errors", f"{_num(sum(t.errors.values()))} cells" + (f": {_counts(t.errors)}" if t.errors else "")),
-            ("code", f"VBA {'yes' if f.vba else 'no'}"
-                     + (f"; custom functions {', '.join(sorted(t.custom))}" if t.custom else "")
-                     + (f"; LAMBDA {', '.join(sorted(t.lambdas))}" if t.lambdas else "")),
-            ("rules", f"{_num(t.cf)} conditional formats, {_num(t.dv)} validations, "
-                      f"{_num(t.names)} names, {_num(t.notes)} notes"),
+            (
+                "code",
+                f"VBA {'yes' if f.vba else 'no'}"
+                + (f"; custom functions {', '.join(sorted(t.custom))}" if t.custom else "")
+                + (f"; LAMBDA {', '.join(sorted(t.lambdas))}" if t.lambdas else ""),
+            ),
+            (
+                "rules",
+                (
+                    f"{_num(t.cf)} conditional formats, {_num(t.dv)} validations, "
+                    f"{_num(t.names)} names, {_num(t.notes)} notes"
+                ),
+            ),
             ("objects", f"{_num(t.tables)} tables, {_num(t.pivots)} pivot tables, {_num(t.charts)} charts"),
-            ("links", f"{f.external_links} external workbooks"
-                      + ("; data connections" if f.connections else "")),
+            ("links", f"{f.external_links} external workbooks" + ("; data connections" if f.connections else "")),
         ]
         out.write(f"{style.heading(f.path)}  {style.dim(_size(f.size))}\n")
-        for label, text in lines:
-            out.write(f"  {style.header(label.ljust(9))}  {text}\n")
+        out.writelines(f"  {style.header(label.ljust(9))}  {text}\n" for label, text in lines)
 
 
 def _record(s: Stats) -> dict:
     return {
-        "range": s.dimension, "cells": s.cells, "values": s.values, "formulas": s.formulas,
-        "unique_formulas": len(s.unique), "longest_formula": s.longest,
-        "volatile_formulas": s.volatile_formulas, "volatile": dict(s.volatile.most_common()),
-        "array_formulas": s.arrays, "data_tables": s.data_tables,
-        "error_cells": sum(s.errors.values()), "errors": dict(s.errors.most_common()),
-        "custom_functions": sorted(s.custom), "lambdas": sorted(s.lambdas),
-        "conditional_formats": s.cf, "validations": s.dv, "names": s.names, "notes": s.notes,
-        "tables": s.tables, "pivot_tables": s.pivots, "charts": s.charts,
+        "range": s.dimension,
+        "cells": s.cells,
+        "values": s.values,
+        "formulas": s.formulas,
+        "unique_formulas": len(s.unique),
+        "longest_formula": s.longest,
+        "volatile_formulas": s.volatile_formulas,
+        "volatile": dict(s.volatile.most_common()),
+        "array_formulas": s.arrays,
+        "data_tables": s.data_tables,
+        "error_cells": sum(s.errors.values()),
+        "errors": dict(s.errors.most_common()),
+        "custom_functions": sorted(s.custom),
+        "lambdas": sorted(s.lambdas),
+        "conditional_formats": s.cf,
+        "validations": s.dv,
+        "names": s.names,
+        "notes": s.notes,
+        "tables": s.tables,
+        "pivot_tables": s.pivots,
+        "charts": s.charts,
     }
 
 
@@ -316,17 +391,23 @@ def _records(files: list[FileStats], by: str | None) -> list[dict]:
         if by == "sheet":
             records += [{"file": f.path, "sheet": s.name, "hidden": s.hidden, **_record(s)} for s in f.sheets]
         else:
-            record = {"file": f.path, "size": f.size, "sheets": len(f.sheets), "hidden_sheets": f.hidden_sheets,
-                      **_record(f.total), "vba": f.vba, "external_links": f.external_links,
-                      "data_connections": f.connections}
+            record = {
+                "file": f.path,
+                "size": f.size,
+                "sheets": len(f.sheets),
+                "hidden_sheets": f.hidden_sheets,
+                **_record(f.total),
+                "vba": f.vba,
+                "external_links": f.external_links,
+                "data_connections": f.connections,
+            }
             del record["range"]  # a per-sheet notion
             records.append(record)
     return records
 
 
 def _write_json(files: list[FileStats], by: str | None, out: TextIO) -> None:
-    for record in _records(files, by):
-        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+    out.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in _records(files, by))
 
 
 def _flat(value: object) -> object:

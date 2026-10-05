@@ -188,7 +188,7 @@ def write_func_stats(groups, by: str | None, mode: str, style: Style, out: TextI
 def _write_func_table(stats: list[FuncStat], include_files: bool, indent: str, style: Style, out: TextIO) -> None:
     headers = ["FUNCTION", "CALLS", "PLACES"] + (["FILES"] if include_files else [])
     rows = [[s.name, str(s.calls), str(s.places)] + ([str(len(s.files))] if include_files else []) for s in stats]
-    widths = [max(display_width(r[i]) for r in rows + [headers]) for i in range(len(headers))]
+    widths = [max(display_width(r[i]) for r in [*rows, headers]) for i in range(len(headers))]
 
     def fmt(cells: list[str]) -> str:
         first = cells[0] + " " * (widths[0] - display_width(cells[0]))

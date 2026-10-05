@@ -71,19 +71,31 @@ def sample_dir(tmp_path: Path) -> Path:
         root / "sales.xlsx",
         {
             "Summary": {
-                "A1": "지역", "B1": "매출액", "C1": "비고",
-                "A2": "서울", "B2": "=VLOOKUP(A2,Data!A:D,4,FALSE)", "C2": "ok",
-                "A3": "부산", "B3": "=VLOOKUP(A3,Data!A:D,4,FALSE)",
-                "A4": "합계", "B4": "=SUM(B2:B3)",
+                "A1": "지역",
+                "B1": "매출액",
+                "C1": "비고",
+                "A2": "서울",
+                "B2": "=VLOOKUP(A2,Data!A:D,4,FALSE)",
+                "C2": "ok",
+                "A3": "부산",
+                "B3": "=VLOOKUP(A3,Data!A:D,4,FALSE)",
+                "A4": "합계",
+                "B4": "=SUM(B2:B3)",
                 "B6": '="VLOOKUP is not called here"',
             },
             "Raw Data": {
-                "A1": "key", "B1": "=_xlfn.XLOOKUP(A1,C:C,D:D)",
+                "A1": "key",
+                "B1": "=_xlfn.XLOOKUP(A1,C:C,D:D)",
                 "A2": "line one\nline two",
             },
         },
-        cached={("Summary", "B2"): 1200, ("Summary", "B3"): 980, ("Summary", "B4"): 2180,
-                ("Summary", "B6"): "VLOOKUP is not called here", ("Raw Data", "B1"): "#N/A"},
+        cached={
+            ("Summary", "B2"): 1200,
+            ("Summary", "B3"): 980,
+            ("Summary", "B4"): 2180,
+            ("Summary", "B6"): "VLOOKUP is not called here",
+            ("Raw Data", "B1"): "#N/A",
+        },
     )
     make_workbook(
         root / "sub" / "budget.xlsx",

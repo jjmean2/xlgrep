@@ -229,9 +229,17 @@ class _Formulas:
         return shared.at(row, col) if shared is not None else "="
 
 
-def _make_cell(row: int, col: int, cell_type: str, style: int,
-               formula: tuple[dict[str, str], str | None] | None, raw_value: str | None,
-               inline: str | None, ctx: _Context, formulas: _Formulas) -> Cell | None:
+def _make_cell(
+    row: int,
+    col: int,
+    cell_type: str,
+    style: int,
+    formula: tuple[dict[str, str], str | None] | None,
+    raw_value: str | None,
+    inline: str | None,
+    ctx: _Context,
+    formulas: _Formulas,
+) -> Cell | None:
     value: object = None
     if cell_type == "inlineStr":
         value = inline
@@ -241,8 +249,15 @@ def _make_cell(row: int, col: int, cell_type: str, style: int,
         attrs, body = formula
         text = formulas.text(attrs, body, row, col)
         kind = attrs.get("t")
-        return Cell(row, col, formula=text, value=value, has_cached_value=value is not None,
-                    shared=attrs.get("si") if kind == "shared" else None, array=kind == "array")
+        return Cell(
+            row,
+            col,
+            formula=text,
+            value=value,
+            has_cached_value=value is not None,
+            shared=attrs.get("si") if kind == "shared" else None,
+            array=kind == "array",
+        )
     if value is None:
         return None
     return Cell(row, col, value=value, has_cached_value=True)
@@ -262,17 +277,17 @@ _DIMENSION_RE = re.compile(rb'<(?:\w+:)?dimension\s+ref="([^"]+)"')
 _CELL_RE = re.compile(
     rb'<c\b(?=[^>]*?\br="([A-Z]{1,3})(\d+)")(?:(?=[^>]*?\bt="(\w+)"))?(?:(?=[^>]*?\bs="(\d+)"))?'
     rb"[^>]*?(?:/>|>(.*?)</c>)",
-    re.S,
+    re.DOTALL,
 )
 _NO_COORD_RE = re.compile(rb'<c\b(?![^>]*?\br=")')
 _SINGLE_QUOTED_RE = re.compile(rb"<[^>]*='")
 _ATTR_RE = re.compile(rb'([\w:]+)="([^"]*)"')
-_F_RE = re.compile(rb"<f\b([^>]*?)(?:/>|>(.*?)</f>)", re.S)
+_F_RE = re.compile(rb"<f\b([^>]*?)(?:/>|>(.*?)</f>)", re.DOTALL)
 _SHARED_DEPENDENT_RE = re.compile(rb'<f t="shared" si="(\d+)"\s*/>(?:<v>([^<]*)</v>)?')
-_V_RE = re.compile(rb"<v(?:\s[^>]*)?>(.*?)</v>", re.S)
-_IS_RE = re.compile(rb"<is>(.*?)</is>", re.S)
-_RPH_RE = re.compile(rb"<rPh\b.*?</rPh>", re.S)
-_T_RE = re.compile(rb"<t\b[^>]*>(.*?)</t>", re.S)
+_V_RE = re.compile(rb"<v(?:\s[^>]*)?>(.*?)</v>", re.DOTALL)
+_IS_RE = re.compile(rb"<is>(.*?)</is>", re.DOTALL)
+_RPH_RE = re.compile(rb"<rPh\b.*?</rPh>", re.DOTALL)
+_T_RE = re.compile(rb"<t\b[^>]*>(.*?)</t>", re.DOTALL)
 
 
 def _xml_text(raw: bytes) -> str:
@@ -326,8 +341,9 @@ def _scan_regex(data: bytes, ctx: _Context, formulas_only: bool = False) -> dict
     return cells
 
 
-def _fast_cell(row: int, col: int, raw_type: bytes, style: int, body: bytes,
-               ctx: _Context, formulas: _Formulas) -> Cell | None:
+def _fast_cell(
+    row: int, col: int, raw_type: bytes, style: int, body: bytes, ctx: _Context, formulas: _Formulas
+) -> Cell | None:
     """The shapes most cells in an Excel file take, without general parsing.
 
     Returns None when the cell is something else; _general_cell handles it then.
@@ -349,13 +365,20 @@ def _fast_cell(row: int, col: int, raw_type: bytes, style: int, body: bytes,
         raw = dep.group(2)
         value = _convert(_xml_text(raw), raw_type.decode() or "n", style, ctx) if raw else None
         si = dep.group(1).decode()
-        return Cell(row, col, formula=formulas.dependent(si, row, col), value=value,
-                    has_cached_value=value is not None, shared=si)
+        return Cell(
+            row,
+            col,
+            formula=formulas.dependent(si, row, col),
+            value=value,
+            has_cached_value=value is not None,
+            shared=si,
+        )
     return None
 
 
-def _general_cell(row: int, col: int, raw_type: bytes, style: int, body: bytes,
-                  ctx: _Context, formulas: _Formulas) -> Cell | None:
+def _general_cell(
+    row: int, col: int, raw_type: bytes, style: int, body: bytes, ctx: _Context, formulas: _Formulas
+) -> Cell | None:
     """Any cell: pull <f>, <v> and <is> out of the body and build it."""
     cell_type = raw_type.decode() or "n"
     formula = None
@@ -401,15 +424,25 @@ def _scan_etree(data: bytes, ctx: _Context, formulas_only: bool = False) -> dict
                         raw_value = child.text
                     elif name == "is":
                         inline = _rich_text(child)
-                cell = _make_cell(row_no, col_no, c.get("t", "n"), int(c.get("s", "0") or 0),
-                                  formula, raw_value, inline, ctx, formulas)
+                cell = _make_cell(
+                    row_no,
+                    col_no,
+                    c.get("t", "n"),
+                    int(c.get("s", "0") or 0),
+                    formula,
+                    raw_value,
+                    inline,
+                    ctx,
+                    formulas,
+                )
                 if cell is not None and (cell.formula is not None or not formulas_only):
                     cells[(row_no, col_no)] = cell
     return cells
 
 
-def read_cells(data: bytes, ctx: _Context, *, force_etree: bool = False,
-               formulas_only: bool = False) -> dict[tuple[int, int], Cell]:
+def read_cells(
+    data: bytes, ctx: _Context, *, force_etree: bool = False, formulas_only: bool = False
+) -> dict[tuple[int, int], Cell]:
     if not force_etree:
         try:
             return _scan_regex(data, ctx, formulas_only)

@@ -15,7 +15,9 @@ from xlgrep.funcs import BUILTIN, CUSTOM, LAMBDA, classify, function_calls
 
 def test_function_calls_skips_strings_and_keeps_prefixes():
     assert function_calls('=IFERROR(VLOOKUP(A1,"SUM(x)",2,0),_xlfn.XLOOKUP(B1,C:C,D:D))') == [
-        "IFERROR", "VLOOKUP", "_xlfn.XLOOKUP",
+        "IFERROR",
+        "VLOOKUP",
+        "_xlfn.XLOOKUP",
     ]
     assert function_calls("=SUM(SUM(A1),B1)") == ["SUM", "SUM"]
     assert function_calls("={1,2;3,4}") == []
@@ -150,5 +152,8 @@ def test_shape_cache_keeps_digit_function_names():
         counter.add(None, "f", formula, set())
     stats = counter.groups[None]
     assert {k: (s.calls, s.places) for k, s in stats.items()} == {
-        "LOG": (2, 2), "LOG10": (1, 1), "DEC2BIN": (1, 1), "SUM": (1, 1),
+        "LOG": (2, 2),
+        "LOG10": (1, 1),
+        "DEC2BIN": (1, 1),
+        "SUM": (1, 1),
     }

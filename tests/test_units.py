@@ -14,8 +14,15 @@ def test_col_letters_roundtrip(col, letters):
 
 @pytest.mark.parametrize(
     "name,quoted",
-    [("Summary", "Summary"), ("요약", "요약"), ("Raw Data", "'Raw Data'"), ("It's", "'It''s'"),
-     ("2024", "'2024'"), ("A1", "'A1'"), ("Q1-Q2", "'Q1-Q2'")],
+    [
+        ("Summary", "Summary"),
+        ("요약", "요약"),
+        ("Raw Data", "'Raw Data'"),
+        ("It's", "'It''s'"),
+        ("2024", "'2024'"),
+        ("A1", "'A1'"),
+        ("Q1-Q2", "'Q1-Q2'"),
+    ],
 )
 def test_quote_sheet(name, quoted):
     assert quote_sheet(name) == quoted

@@ -21,7 +21,7 @@ from xlgrep.objects import read_objects
 X14_EXT = (
     '<extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}" '
     'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">'
-    '<x14:conditionalFormattings><x14:conditionalFormatting '
+    "<x14:conditionalFormattings><x14:conditionalFormatting "
     'xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">'
     '<x14:cfRule type="expression" priority="9" id="{00000000-0000-0000-0000-000000000001}">'
     "<xm:f>_xlfn.XLOOKUP($A1,Codes!A:A,Codes!B:B)=1</xm:f></x14:cfRule>"
@@ -143,12 +143,18 @@ def test_sheet_and_range_filters(run):
 def test_json_and_csv(run):
     _, out, _ = run("--json", "--objects", "dv", "COUNTIF")
     assert json.loads(out) == {
-        "file": "rules.xlsx", "object": "dv", "sheet": "Summary", "ref": "A1:A100", "kind": "formula",
-        "text": "=COUNTIF($A:$A,A1)=1", "matches": [{"start": 1, "end": 8, "text": "COUNTIF"}],
-        "dv_type": "custom", "part": "formula1",
+        "file": "rules.xlsx",
+        "object": "dv",
+        "sheet": "Summary",
+        "ref": "A1:A100",
+        "kind": "formula",
+        "text": "=COUNTIF($A:$A,A1)=1",
+        "matches": [{"start": 1, "end": 8, "text": "COUNTIF"}],
+        "dv_type": "custom",
+        "part": "formula1",
     }
     _, out, _ = run("--csv", "-f", "XLOOKUP")
-    assert out.splitlines()[1] == "rules.xlsx,Summary,cf,D1:D20,formula,\"=XLOOKUP($A1,Codes!A:A,Codes!B:B)=1\","
+    assert out.splitlines()[1] == 'rules.xlsx,Summary,cf,D1:D20,formula,"=XLOOKUP($A1,Codes!A:A,Codes!B:B)=1",'
 
 
 def test_pretty_lists_objects_under_sheet(run):

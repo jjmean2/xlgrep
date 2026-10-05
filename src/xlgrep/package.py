@@ -86,11 +86,13 @@ def open_package(zf: zipfile.ZipFile) -> Package:
         for s in children(sheets_elem, "sheet"):
             rid = next((v for k, v in s.attrib.items() if local(k) == "id"), "")
             rel_type, part = wb_rels.get(rid, ("", ""))
-            sheets.append(SheetInfo(
-                name=s.get("name", ""),
-                hidden=s.get("state", "visible") != "visible",
-                part=part if rel_type.endswith(REL_SHEET) else None,
-            ))
+            sheets.append(
+                SheetInfo(
+                    name=s.get("name", ""),
+                    hidden=s.get("state", "visible") != "visible",
+                    part=part if rel_type.endswith(REL_SHEET) else None,
+                )
+            )
     return Package(wb_part, wb_root, wb_rels, sheets)
 
 
@@ -131,8 +133,9 @@ def external_books(zf: zipfile.ZipFile, pkg: Package) -> list[ExternalBook | Non
                 if elem is not None:
                     target_id = next((v for k, v in elem.attrib.items() if local(k) == "id"), "")
                     target = rels(zf, part, external=True).get(target_id, ("", ""))[1]
-                    sheets = [s.get("val", "") for names in children(elem, "sheetNames")
-                              for s in children(names, "sheetName")]
+                    sheets = [
+                        s.get("val", "") for names in children(elem, "sheetNames") for s in children(names, "sheetName")
+                    ]
                     book = ExternalBook(target, sheets)
             books.append(book)
     return books
@@ -145,8 +148,16 @@ class Connection:
 
 
 # The "type" attribute of <connection>.
-_CONNECTION_TYPES = {"1": "ODBC", "2": "DAO", "3": "file", "4": "web query", "5": "OLE DB", "6": "text file",
-                     "7": "ADO", "8": "DSP"}
+_CONNECTION_TYPES = {
+    "1": "ODBC",
+    "2": "DAO",
+    "3": "file",
+    "4": "web query",
+    "5": "OLE DB",
+    "6": "text file",
+    "7": "ADO",
+    "8": "DSP",
+}
 
 
 def connections(zf: zipfile.ZipFile, pkg: Package) -> list[Connection]:

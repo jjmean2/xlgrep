@@ -76,7 +76,7 @@ class ScopedWorkbook:
             self.zip.close()
             raise
 
-    def __enter__(self) -> ScopedWorkbook:
+    def __enter__(self) -> ScopedWorkbook:  # noqa: PYI034 (typing.Self needs Python 3.11)
         return self
 
     def __exit__(self, *exc) -> None:
@@ -106,8 +106,9 @@ class ScopedWorkbook:
             if self._cells is not None and info.part is not None:
                 sheet = self._cells.read(info, formulas_only=self.formulas_only)
                 cells = [c for c in sheet.sorted_cells() if rng is None or rng.contains(c.row, c.col)]
-            objects = [o for o in self.objects.by_sheet[info.name]
-                       if o.object in kinds and (rng is None or o.in_range(rng))]
+            objects = [
+                o for o in self.objects.by_sheet[info.name] if o.object in kinds and (rng is None or o.in_range(rng))
+            ]
             yield Part(info.name, info.hidden, info, sheet, cells or [], objects)
         # Workbook-scoped names belong to no sheet or range, so --sheet/--range exclude them.
         if "name" in kinds and not scope.sheet_globs and rng is None:

@@ -137,9 +137,9 @@ def resolve_target(raw: str, source: Path, searched: list[Path]) -> tuple[str, s
     """
     text = unquote(raw)
     if text.lower().startswith("file:///"):
-        text = text[len("file:///"):]
+        text = text[len("file:///") :]
     elif text.lower().startswith("file://"):  # file://server/share/x.xlsx
-        text = "\\\\" + text[len("file://"):]
+        text = "\\\\" + text[len("file://") :]
     if not _WINDOWS_ABSOLUTE.match(text):
         local = Path(text) if Path(text).is_absolute() else source.parent / text.replace("\\", "/")
         if local.exists():
@@ -192,16 +192,14 @@ def edges(deps: FileDeps, by: str | None, searched: list[Path]) -> list[Edge]:
 # ---------------------------------------------------------------- rendering
 
 
-def write_deps(all_edges: list[list[Edge]], by: str | None, mode: str, style: Style,
-               out: TextIO | None = None) -> None:
+def write_deps(all_edges: list[list[Edge]], by: str | None, mode: str, style: Style, out: TextIO | None = None) -> None:
     """``all_edges`` has one list per workbook (empty if it has no dependencies)."""
     out = out if out is not None else sys.stdout
     if mode == "json":
         for e in (e for file_edges in all_edges for e in file_edges):
             out.write(json.dumps(_record(e), ensure_ascii=False) + "\n")
     elif mode == "csv":
-        writer = csv.DictWriter(out, fieldnames=list(_record(Edge("", None, "", None, "")).keys()),
-                                lineterminator="\n")
+        writer = csv.DictWriter(out, fieldnames=list(_record(Edge("", None, "", None, "")).keys()), lineterminator="\n")
         writer.writeheader()
         writer.writerows(_record(e) for file_edges in all_edges for e in file_edges)
     elif mode == "mermaid":
@@ -211,9 +209,16 @@ def write_deps(all_edges: list[list[Edge]], by: str | None, mode: str, style: St
 
 
 def _record(e: Edge) -> dict:
-    return {"from": e.source, "from_sheet": e.from_sheet, "to": e.target, "to_sheet": e.to_sheet,
-            "kind": e.kind, "formulas": e.formulas if e.kind != "data" else None,
-            "status": e.status, "type": e.detail}
+    return {
+        "from": e.source,
+        "from_sheet": e.from_sheet,
+        "to": e.target,
+        "to_sheet": e.to_sheet,
+        "kind": e.kind,
+        "formulas": e.formulas if e.kind != "data" else None,
+        "status": e.status,
+        "type": e.detail,
+    }
 
 
 def _formulas(n: int) -> str:

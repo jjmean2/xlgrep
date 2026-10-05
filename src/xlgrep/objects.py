@@ -74,8 +74,9 @@ def read_objects(path: Path, kinds: set[str], raw_formula: bool = False) -> Work
         return read_package_objects(zf, open_package(zf), kinds, raw_formula)
 
 
-def read_package_objects(zf: zipfile.ZipFile, pkg: Package, kinds: set[str],
-                         raw_formula: bool = False) -> WorkbookObjects:
+def read_package_objects(
+    zf: zipfile.ZipFile, pkg: Package, kinds: set[str], raw_formula: bool = False
+) -> WorkbookObjects:
     """Like read_objects, for a workbook that is already open."""
     sheets = pkg.sheets
     by_sheet: dict[str, list[SheetObject]] = {s.name: [] for s in sheets}
@@ -94,8 +95,9 @@ def read_package_objects(zf: zipfile.ZipFile, pkg: Package, kinds: set[str],
                     continue
                 local_id = dn.get("localSheetId")
                 sheet = sheets[int(local_id)].name if local_id is not None and int(local_id) < len(sheets) else None
-                obj = SheetObject("name", sheet, name, text, True,
-                                  {"hidden": "true"} if dn.get("hidden") in ("1", "true") else {})
+                obj = SheetObject(
+                    "name", sheet, name, text, True, {"hidden": "true"} if dn.get("hidden") in ("1", "true") else {}
+                )
                 (by_sheet[sheet] if sheet is not None else workbook_names).append(obj)
 
     for info in sheets:
@@ -120,11 +122,9 @@ def _sheet_tail(zf: zipfile.ZipFile, part: str) -> ET.Element:
     start = data.find(b"<sheetData")
     if start == -1:
         return ET.fromstring(data)
-    end_tag = data.find(b"</sheetData>", start)
-    if end_tag != -1:
-        end = end_tag + len(b"</sheetData>")
-    else:  # self-closing <sheetData/>
-        end = data.find(b">", start) + 1
+    close = data.find(b"</sheetData>", start)
+    # Without a closing tag it's a self-closing <sheetData/>, which ends at its own ">".
+    end = close + len(b"</sheetData>") if close != -1 else data.find(b">", start) + 1
     return ET.fromstring(data[:start] + data[end:])
 
 
@@ -147,8 +147,9 @@ def _sheet_rules(zf: zipfile.ZipFile, info: SheetInfo, kinds: set[str], raw_form
                 ref = _sqref(dv.get("sqref"))
                 for part in ("formula1", "formula2"):
                     texts = [f.text for f in _children(dv, part)]
-                    out += _rule_objects("dv", info.name, ref, texts, raw_formula,
-                                         {"dv_type": dv.get("type", "any"), "part": part})
+                    out += _rule_objects(
+                        "dv", info.name, ref, texts, raw_formula, {"dv_type": dv.get("type", "any"), "part": part}
+                    )
 
     # Excel 2010+ extensions (rules referring to other sheets, newer rule types).
     for ext_list in _children(root, "extLst"):
@@ -160,15 +161,22 @@ def _sheet_rules(zf: zipfile.ZipFile, info: SheetInfo, kinds: set[str], raw_form
                         ref = _sqref(next((s.text for s in _children(cf, "sqref")), ""))
                         for rule in _children(cf, "cfRule"):
                             texts = [f.text for f in rule.iter() if _local(f.tag) == "f"]
-                            out += _rule_objects("cf", info.name, ref, texts, raw_formula,
-                                                 {"rule_type": rule.get("type", "")})
+                            out += _rule_objects(
+                                "cf", info.name, ref, texts, raw_formula, {"rule_type": rule.get("type", "")}
+                            )
                 elif name == "dataValidations" and "dv" in kinds:
                     for dv in _children(block, "dataValidation"):
                         ref = _sqref(next((s.text for s in _children(dv, "sqref")), ""))
                         for part in ("formula1", "formula2"):
                             texts = [f.text for p in _children(dv, part) for f in _children(p, "f")]
-                            out += _rule_objects("dv", info.name, ref, texts, raw_formula,
-                                                 {"dv_type": dv.get("type", "any"), "part": part})
+                            out += _rule_objects(
+                                "dv",
+                                info.name,
+                                ref,
+                                texts,
+                                raw_formula,
+                                {"dv_type": dv.get("type", "any"), "part": part},
+                            )
     return out
 
 

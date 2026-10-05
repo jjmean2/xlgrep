@@ -318,8 +318,7 @@ class PrettyFormatter(Formatter):
                 grid[(r, c)] = _truncate(text, spans, self.opts.max_width)
 
         widths = {
-            c: max([display_width(col_letter(c))] + [display_width(grid[(r, c)][0]) for r in all_rows])
-            for c in cols
+            c: max([display_width(col_letter(c))] + [display_width(grid[(r, c)][0]) for r in all_rows]) for c in cols
         }
         num_w = max(len(str(r)) for r in all_rows)
         bar = st.dim("│")
@@ -440,7 +439,10 @@ class CsvFormatter(Formatter):
 
 
 FORMATTERS: dict[str, type[Formatter]] = {
-    "line": LineFormatter, "pretty": PrettyFormatter, "json": JsonFormatter, "csv": CsvFormatter,
+    "line": LineFormatter,
+    "pretty": PrettyFormatter,
+    "json": JsonFormatter,
+    "csv": CsvFormatter,
 }
 
 

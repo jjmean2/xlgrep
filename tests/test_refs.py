@@ -7,13 +7,12 @@ from pathlib import Path
 import openpyxl
 import pytest
 from openpyxl.formatting.rule import FormulaRule
+from openpyxl.formula.translate import Translator
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from xlgrep.address import CellRange, parse_range
 from xlgrep.cli import main
-from openpyxl.formula.translate import Translator
-
 from xlgrep.refs import RefContext, RefFinder, SharedFormula, Target, parse_target, scan_refs
 
 
@@ -27,11 +26,14 @@ def test_scan_refs_forms():
         ("'Raw Data'!$B$2", ("Raw Data",), False, None),
     ]
     assert refs_of("=VLOOKUP(A2,Data!A:D,4,0)+SUM(3:3)") == [
-        ("A2", None, False, None), ("Data!A:D", ("Data",), False, None), ("3:3", None, False, None),
+        ("A2", None, False, None),
+        ("Data!A:D", ("Data",), False, None),
+        ("3:3", None, False, None),
     ]
     assert refs_of("=SUM(Sheet1:Sheet3!B2)") == [("Sheet1:Sheet3!B2", ("Sheet1", "Sheet3"), False, None)]
     assert refs_of("=[1]Ext!A1+'[Book.xlsx]Ext'!B2") == [
-        ("[1]Ext!A1", ("Ext",), True, None), ("'[Book.xlsx]Ext'!B2", ("Ext",), True, None),
+        ("[1]Ext!A1", ("Ext",), True, None),
+        ("'[Book.xlsx]Ext'!B2", ("Ext",), True, None),
     ]
     assert refs_of("=Data!A1#+LOG10(5)") == [("Data!A1#", ("Data",), False, None)]
 
@@ -39,17 +41,25 @@ def test_scan_refs_forms():
 def test_scan_refs_external_books():
     refs = scan_refs("=[1]Rates!A1+'[2]My Sheet'!$B$2+[3]!TaxRate+'[Book.xlsx]Ext'!C3")
     assert [(r.book, r.sheets, r.name) for r in refs] == [
-        ("1", ("Rates",), None), ("2", ("My Sheet",), None), ("3", None, "TaxRate"), ("Book.xlsx", ("Ext",), None),
+        ("1", ("Rates",), None),
+        ("2", ("My Sheet",), None),
+        ("3", None, "TaxRate"),
+        ("Book.xlsx", ("Ext",), None),
     ]
 
 
 def test_scan_refs_ignores_strings_tables_and_function_names():
     assert refs_of('=INDIRECT("Data!A1")') == []
     assert refs_of("=SUM(Table1[Amount])+Table1[[#This Row],[Qty]]") == []
-    assert refs_of("=_xlfn.XLOOKUP(A1,B:B,C:C)") == [("A1", None, False, None), ("B:B", None, False, None),
-                                                    ("C:C", None, False, None)]
+    assert refs_of("=_xlfn.XLOOKUP(A1,B:B,C:C)") == [
+        ("A1", None, False, None),
+        ("B:B", None, False, None),
+        ("C:C", None, False, None),
+    ]
     assert refs_of("=TaxRate*A1:INDEX(B:B,5)+TRUE") == [
-        ("TaxRate", None, False, "TaxRate"), ("A1", None, False, None), ("B:B", None, False, None),
+        ("TaxRate", None, False, "TaxRate"),
+        ("A1", None, False, None),
+        ("B:B", None, False, None),
     ]
 
 
@@ -67,8 +77,12 @@ def test_ref_finder_names_3d_and_sweep():
         [parse_target("Data!A:D")],
         RefContext(
             ["Summary", "Data", "Other"],
-            {(None, "SALESRANGE"): "=Data!B:B", (None, "CHAINED"): "=SalesRange*2", (None, "LOOP"): "=Loop+1",
-             ("Summary", "LOCAL"): "=Other!A1"},
+            {
+                (None, "SALESRANGE"): "=Data!B:B",
+                (None, "CHAINED"): "=SalesRange*2",
+                (None, "LOOP"): "=Loop+1",
+                ("Summary", "LOCAL"): "=Other!A1",
+            },
         ),
     )
     assert [(h.text, h.via) for h in finder.find("=SUM(SalesRange)", "Summary")] == [("SalesRange", "SalesRange")]

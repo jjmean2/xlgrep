@@ -92,9 +92,15 @@ def test_filters(run):
     assert out == "sales.xlsx:3\n"
     _, out, _ = run("--range", "B3:B4", "-o", "[A-Z]+")
     assert out.splitlines() == [
-        "sales.xlsx:Summary!B3:VLOOKUP", "sales.xlsx:Summary!B3:A", "sales.xlsx:Summary!B3:D",
-        "sales.xlsx:Summary!B3:A", "sales.xlsx:Summary!B3:D", "sales.xlsx:Summary!B3:FALSE",
-        "sales.xlsx:Summary!B4:SUM", "sales.xlsx:Summary!B4:B", "sales.xlsx:Summary!B4:B",
+        "sales.xlsx:Summary!B3:VLOOKUP",
+        "sales.xlsx:Summary!B3:A",
+        "sales.xlsx:Summary!B3:D",
+        "sales.xlsx:Summary!B3:A",
+        "sales.xlsx:Summary!B3:D",
+        "sales.xlsx:Summary!B3:FALSE",
+        "sales.xlsx:Summary!B4:SUM",
+        "sales.xlsx:Summary!B4:B",
+        "sales.xlsx:Summary!B4:B",
     ]
 
 
@@ -109,8 +115,16 @@ def test_json(run):
     _, out, _ = run("--json", "SUM")
     rec = json.loads(out)
     assert rec == {
-        "file": "sales.xlsx", "object": "cell", "sheet": "Summary", "cell": "B4", "row": 4, "col": 2,
-        "kind": "formula", "formula": "=SUM(B2:B3)", "value": 2180, "text": "=SUM(B2:B3)",
+        "file": "sales.xlsx",
+        "object": "cell",
+        "sheet": "Summary",
+        "cell": "B4",
+        "row": 4,
+        "col": 2,
+        "kind": "formula",
+        "formula": "=SUM(B2:B3)",
+        "value": 2180,
+        "text": "=SUM(B2:B3)",
         "matches": [{"start": 1, "end": 4, "text": "SUM"}],
     }
 

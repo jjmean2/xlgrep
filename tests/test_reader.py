@@ -9,14 +9,14 @@ import openpyxl
 import pytest
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
-from xlgrep.workbook import _context, read_cells, read_sheets
 from xlgrep.package import open_package
+from xlgrep.workbook import _context, read_cells, read_sheets
 
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 SHARED_STRINGS = [
-    "<si><r><t>Hel</t></r><r><rPr><b/></rPr><t>lo</t></r><rPh sb=\"0\" eb=\"1\"><t>ignored</t></rPh></si>",
+    '<si><r><t>Hel</t></r><r><rPr><b/></rPr><t>lo</t></r><rPh sb="0" eb="1"><t>ignored</t></rPh></si>',
     "<si><t>line_x000D_break</t></si>",
     "<si><t>한글 &amp; 기호</t></si>",
 ]
@@ -28,23 +28,30 @@ STYLES = (
 )
 
 CELLS = [
-    '<row r="1">'
-    '<c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c><c r="C1" t="b"><v>1</v></c>'
-    '<c r="D1" s="1"><v>45000</v></c><c r="E1" t="inlineStr"><is><t>a &amp; b</t></is></c>'
-    '<c r="F1" t="str"><f>A1&amp;"x"</f><v>Hellox</v></c><c r="G1"><f t="array" ref="G1:G2">SUM(B1:B2*2)</f><v>87</v></c>'
-    '<c r="H1"><f>_xlfn.XLOOKUP(A1,B:B,C:C)</f><v>1</v></c><c r="J1" s="1"/>'
-    '<c r="K1"><f t="dataTable" ref="K1:K2" dt2D="0" dtr="0" r1="B1"/><v>5</v></c>'
-    "</row>",
-    '<row r="2">'
-    '<c r="A2" t="s"><v>1</v></c><c r="B2"><v>1.5</v></c><c r="C2" t="e"><v>#N/A</v></c>'
-    '<c r="D2" s="2"><v>0.5</v></c><c r="E2" t="inlineStr"><is><r><t>rich </t></r><r><t>inline</t></r></is></c>'
-    '<c r="F2"><f t="shared" ref="F2:F4" si="0">B2*2</f><v>3</v></c><c r="G2"><v>0</v></c>'
-    '<c r="H2" s="3"><v>45000.25</v></c>'
-    "</row>",
-    '<row r="3">'
-    '<c r="A3" t="s"><v>2</v></c><c r="B3"><v>1E3</v></c><c r="D3" s="4"><v>45000</v></c>'
-    '<c r="F3"><f t="shared" si="0"/><v>2000</v></c>'
-    "</row>",
+    (
+        '<row r="1">'
+        '<c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c><c r="C1" t="b"><v>1</v></c>'
+        '<c r="D1" s="1"><v>45000</v></c><c r="E1" t="inlineStr"><is><t>a &amp; b</t></is></c>'
+        '<c r="F1" t="str"><f>A1&amp;"x"</f><v>Hellox</v></c>'
+        '<c r="G1"><f t="array" ref="G1:G2">SUM(B1:B2*2)</f><v>87</v></c>'
+        '<c r="H1"><f>_xlfn.XLOOKUP(A1,B:B,C:C)</f><v>1</v></c><c r="J1" s="1"/>'
+        '<c r="K1"><f t="dataTable" ref="K1:K2" dt2D="0" dtr="0" r1="B1"/><v>5</v></c>'
+        "</row>"
+    ),
+    (
+        '<row r="2">'
+        '<c r="A2" t="s"><v>1</v></c><c r="B2"><v>1.5</v></c><c r="C2" t="e"><v>#N/A</v></c>'
+        '<c r="D2" s="2"><v>0.5</v></c><c r="E2" t="inlineStr"><is><r><t>rich </t></r><r><t>inline</t></r></is></c>'
+        '<c r="F2"><f t="shared" ref="F2:F4" si="0">B2*2</f><v>3</v></c><c r="G2"><v>0</v></c>'
+        '<c r="H2" s="3"><v>45000.25</v></c>'
+        "</row>"
+    ),
+    (
+        '<row r="3">'
+        '<c r="A3" t="s"><v>2</v></c><c r="B3"><v>1E3</v></c><c r="D3" s="4"><v>45000</v></c>'
+        '<c r="F3"><f t="shared" si="0"/><v>2000</v></c>'
+        "</row>"
+    ),
     '<row r="4"><c r="F4"><f t="shared" si="0"/></c></row>',
 ]
 
@@ -55,7 +62,9 @@ def sheet_xml(rows=CELLS, prefix=""):
     body = "".join(rows)
     if prefix:
         body = body.replace("<", f"<{p}").replace(f"<{p}/", f"</{p}")
-    return f'<?xml version="1.0" encoding="UTF-8"?><{p}worksheet {ns}><{p}sheetData>{body}</{p}sheetData></{p}worksheet>'
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?><{p}worksheet {ns}><{p}sheetData>{body}</{p}sheetData></{p}worksheet>'
+    )
 
 
 def write_xlsx(path: Path, sheet: str, date1904: bool = False) -> Path:
@@ -160,8 +169,10 @@ def test_implicit_coordinates_fall_back(tmp_path, book):
     ]
     cells = cells_of(write_xlsx(tmp_path / "implicit.xlsx", sheet_xml(rows)))
     assert cells == {
-        (1, 1): (None, "Hello", True), (1, 2): (None, 42, True),
-        (3, 2): (None, 7, True), (3, 3): (None, False, True),
+        (1, 1): (None, "Hello", True),
+        (1, 2): (None, 42, True),
+        (3, 2): (None, 7, True),
+        (3, 3): (None, False, True),
     }
 
 
@@ -178,10 +189,18 @@ def test_matches_openpyxl(book):
         warnings.simplefilter("ignore")
         formulas = openpyxl.load_workbook(book, read_only=True)["Data"]
         values = openpyxl.load_workbook(book, read_only=True, data_only=True)["Data"]
-        f_cells = {(c.row, c.column): c.value for row in formulas.iter_rows() for c in row
-                   if c.value is not None and hasattr(c, "row")}
-        v_cells = {(c.row, c.column): c.value for row in values.iter_rows() for c in row
-                   if c.value is not None and hasattr(c, "row")}
+        f_cells = {
+            (c.row, c.column): c.value
+            for row in formulas.iter_rows()
+            for c in row
+            if c.value is not None and hasattr(c, "row")
+        }
+        v_cells = {
+            (c.row, c.column): c.value
+            for row in values.iter_rows()
+            for c in row
+            if c.value is not None and hasattr(c, "row")
+        }
     skip = {(2, 1), (3, 4)}
     for pos, raw in f_cells.items():
         if pos in skip:
