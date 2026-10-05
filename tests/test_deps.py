@@ -38,18 +38,24 @@ def add_links(path: Path, targets: list[str], connection: str | None = None) -> 
                 data = data.replace("</Relationships>", extra + "</Relationships>")
             dst.writestr(item, data)
         for i, target in enumerate(targets, 1):
-            dst.writestr(f"xl/externalLinks/externalLink{i}.xml",
-                         f'<externalLink xmlns="{MAIN}" xmlns:r="{REL}"><externalBook r:id="rId1">'
-                         '<sheetNames><sheetName val="Budget"/></sheetNames></externalBook></externalLink>')
-            dst.writestr(f"xl/externalLinks/_rels/externalLink{i}.xml.rels",
-                         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                         f'<Relationship Id="rId1" Type="{REL}/externalLinkPath" Target="{target}" '
-                         'TargetMode="External"/></Relationships>')
+            dst.writestr(
+                f"xl/externalLinks/externalLink{i}.xml",
+                f'<externalLink xmlns="{MAIN}" xmlns:r="{REL}"><externalBook r:id="rId1">'
+                '<sheetNames><sheetName val="Budget"/></sheetNames></externalBook></externalLink>',
+            )
+            dst.writestr(
+                f"xl/externalLinks/_rels/externalLink{i}.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                f'<Relationship Id="rId1" Type="{REL}/externalLinkPath" Target="{target}" '
+                'TargetMode="External"/></Relationships>',
+            )
         if connection:
-            dst.writestr("xl/connections.xml",
-                         f'<connections xmlns="{MAIN}"><connection id="1" name="{connection}" type="5">'
-                         '<dbPr connection="Provider=Microsoft.Mashup.OleDb.1;Password=secret" command=""/>'
-                         "</connection></connections>")
+            dst.writestr(
+                "xl/connections.xml",
+                f'<connections xmlns="{MAIN}"><connection id="1" name="{connection}" type="5">'
+                '<dbPr connection="Provider=Microsoft.Mashup.OleDb.1;Password=secret" command=""/>'
+                "</connection></connections>",
+            )
     shutil.move(tmp, path)
 
 
@@ -77,9 +83,11 @@ def tree(tmp_path: Path) -> Path:
     data.conditional_formatting.add("A1:A9", FormulaRule(formula=["Summary!$A$1>0"]))
     wb.defined_names["Rates"] = DefinedName("Rates", attr_text="[2]Rates!$A:$B")
     wb.save(tmp_path / "sales.xlsx")
-    add_links(tmp_path / "sales.xlsx",
-              ["budget.xlsx", "file:///C:\\%EA%B3%B5%EC%9C%A0\\rates.xlsx", "file:///D:\\old\\Lookup.xlsx"],
-              connection="Query - Sales")
+    add_links(
+        tmp_path / "sales.xlsx",
+        ["budget.xlsx", "file:///C:\\%EA%B3%B5%EC%9C%A0\\rates.xlsx", "file:///D:\\old\\Lookup.xlsx"],
+        connection="Query - Sales",
+    )
     return tmp_path
 
 
@@ -132,10 +140,26 @@ def test_by_sheet(run):
 def test_json_csv_and_no_secrets(run):
     _, out, _ = run("--json")
     records = [json.loads(line) for line in out.splitlines()]
-    assert {"from": "sales.xlsx", "from_sheet": None, "to": "budget.xlsx", "to_sheet": None, "kind": "file",
-            "formulas": 2, "status": "found", "type": None} in records
-    assert {"from": "sales.xlsx", "from_sheet": None, "to": "Query - Sales", "to_sheet": None, "kind": "data",
-            "formulas": None, "status": None, "type": "Power Query"} in records
+    assert {
+        "from": "sales.xlsx",
+        "from_sheet": None,
+        "to": "budget.xlsx",
+        "to_sheet": None,
+        "kind": "file",
+        "formulas": 2,
+        "status": "found",
+        "type": None,
+    } in records
+    assert {
+        "from": "sales.xlsx",
+        "from_sheet": None,
+        "to": "Query - Sales",
+        "to_sheet": None,
+        "kind": "data",
+        "formulas": None,
+        "status": None,
+        "type": "Power Query",
+    } in records
     assert "secret" not in out
     _, out, _ = run("--csv")
     assert out.splitlines()[0] == "from,from_sheet,to,to_sheet,kind,formulas,status,type"
@@ -152,13 +176,22 @@ def test_mermaid(run):
     _, out, _ = run("--graph", "mermaid", "--by", "sheet")
     lines = out.splitlines()
     box = lines.index('  subgraph w0["sales.xlsx"]')
-    assert lines[box + 1 : box + 6] == ['    n0["(workbook)"]', '    n2["Summary"]', '    n4["Report"]',
-                                        '    n6["Data"]', "  end"]
+    assert lines[box + 1 : box + 6] == [
+        '    n0["(workbook)"]',
+        '    n2["Summary"]',
+        '    n4["Report"]',
+        '    n6["Data"]',
+        "  end",
+    ]
     assert "  n2 -->|3| n6" in lines and "  w0 --> n7" in lines
 
 
-def test_parallel_and_exit_codes(run):
+@pytest.mark.slow
+def test_parallel(run):
     assert run("-j", "2") == run("-j", "1")
+
+
+def test_exit_codes(run):
     code, out, _ = run("budget.xlsx")
     assert (code, out) == (1, "")
     for args in (["-f", "SUM"], ["--graph", "mermaid", "--stats"]):
@@ -171,4 +204,6 @@ def test_resolve_target(tmp_path):
     searched = [tmp_path / "a.xlsx", tmp_path / "b.xlsx"]
     assert resolve_target("file:///C:\\x\\A.XLSX", tmp_path / "s.xlsx", searched)[1] == MATCHED
     assert resolve_target("file://server/share/z.xlsx", tmp_path / "s.xlsx", searched) == (
-        "\\\\server/share/z.xlsx", MISSING)
+        "\\\\server/share/z.xlsx",
+        MISSING,
+    )

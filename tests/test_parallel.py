@@ -1,4 +1,7 @@
-"""Parallel runs (-j) must print exactly what a sequential run prints."""
+"""Parallel runs (-j) must print exactly what a sequential run prints.
+
+Tests that start worker processes are marked slow (skipped by the pre-commit hook).
+"""
 
 import os
 from pathlib import Path
@@ -24,6 +27,7 @@ def run(sample_dir, capsys):
     return _run
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "args",
     [
@@ -47,6 +51,7 @@ def test_parallel_matches_sequential(run, args):
     assert sequential[1]
 
 
+@pytest.mark.slow
 def test_parallel_errors_keep_order(run, sample_dir):
     (sample_dir / "broken.xlsx").write_text("not a zip")
     code, out, err = run("-j", "2", "VLOOKUP", "missing.xlsx", "broken.xlsx", "sales.xlsx")
@@ -58,6 +63,7 @@ def test_parallel_errors_keep_order(run, sample_dir):
     assert out.startswith("sales.xlsx:")
 
 
+@pytest.mark.slow
 def test_quiet_stops_on_first_match(run):
     assert run("-j", "2", "-q", "VLOOKUP")[:2] == (0, "")
 

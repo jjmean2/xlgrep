@@ -10,10 +10,16 @@ Excel 워크북(.xlsx/.xlsm/.xltx/.xltm) 셀을 grep처럼 검색하는 Python C
 
 ```bash
 uv sync                 # 환경 구성 (프로젝트는 editable 설치)
+uv run pre-commit install   # 클론마다 한 번: 커밋 시 ruff check --fix → ruff format → 빠른 테스트
 uv run xlgrep --help
-uv run pytest           # 전체 테스트
+uv run pytest           # 전체 테스트 (pre-commit은 -m "not slow"로 워커 프로세스 테스트를 건너뜀)
+uv run ruff check --fix . && uv run ruff format .
 uv build                # dist/ 에 sdist + wheel
 ```
+
+- ruff 설정은 pyproject.toml `[tool.ruff]`(줄 길이 120, 규칙과 각 이유). 규칙을 끄려면 이유를 주석으로 남긴다.
+- 워커 프로세스를 띄우는 테스트에는 `@pytest.mark.slow`를 붙인다.
+- 훅이 파일을 고치면 커밋이 중단된다. 고쳐진 파일을 다시 `git add` 해서 커밋한다.
 
 폴더를 옮기거나 이름을 바꾸면 `.venv`에 절대 경로가 남아 있으므로 `rm -rf .venv && uv sync`.
 

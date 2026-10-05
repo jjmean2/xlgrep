@@ -1,0 +1,22 @@
+# Checks run on `git commit` (install once per clone: `uv run pre-commit install`).
+# Hooks call the project's own tools through uv, so their versions come from uv.lock.
+# Ruff's lint fixes go before formatting, as Ruff recommends.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (lint, with fixes)
+        entry: uv run --frozen ruff check --fix
+        language: unsupported
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: unsupported
+        types: [python]
+      - id: pytest-fast
+        name: pytest (skips slow tests)
+        entry: uv run --frozen pytest -q -m "not slow" -x
+        language: unsupported
+        types: [python]
+        pass_filenames: false

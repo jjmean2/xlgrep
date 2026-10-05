@@ -133,6 +133,8 @@ xl/comments1.xml                  → 셀 메모
 | `test_deps.py` | `--deps` 파일·시트·데이터 의존, 경로 해석(found / matched / missing), Mermaid, 연결 문자열 비노출 |
 | `test_parallel.py` | `-j1`과 `-j2` 출력이 모든 형식에서 같음 |
 
+워커 프로세스를 띄우는 테스트는 `@pytest.mark.slow`이고, 커밋 때 pre-commit 훅은 이들을 빼고(`-m "not slow"`) 돌린다.
+
 `tests/conftest.py`의 `make_workbook`은 openpyxl로 파일을 만든 뒤 계산값을 XML에 패치한다(openpyxl은 계산값을 쓰지 않음).
 
 ## 6. 이해했는지 확인하는 질문

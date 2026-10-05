@@ -19,8 +19,10 @@ For development:
 
 ```
 uv sync
+uv run pre-commit install   # once per clone: lint, format and fast tests on every commit
 uv run xlgrep --help
-uv run pytest
+uv run pytest               # all tests (the hook skips the slow, multi-process ones)
+uv run ruff check --fix . && uv run ruff format .
 ```
 
 ## Usage

@@ -27,5 +27,32 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.2",
     "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Defaults (E4, E7, E9, F: syntax errors, undefined/unused names) plus:
+extend-select = [
+    "E", "W",  # pycodestyle, incl. line length (the formatter can't split long strings)
+    "I",       # import order
+    "B",       # likely bugs (mutable defaults, zip without strict=, ...)
+    "UP",      # syntax the target Python version allows
+    "SIM",     # simpler equivalents
+    "C4",      # comprehensions
+    "PIE",     # unnecessary code
+    "RUF",     # ruff's own checks
+]
+ignore = [
+    "DTZ001",  # Excel dates and times have no time zone; naive datetimes are correct here
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: starts worker processes; skipped by the pre-commit hook (pytest -m 'not slow')",
 ]
