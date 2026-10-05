@@ -1,0 +1,5 @@
+# Bulk formatting/lint commits, skipped by `git blame`
+# (git config blame.ignoreRevsFile .git-blame-ignore-revs; GitHub reads it automatically).
+
+# style: apply ruff format and lint fixes
+5ea9905aee058a0e6710a9d57935ddfadcc69780
